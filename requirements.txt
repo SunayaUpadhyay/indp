@@ -1,0 +1,25 @@
+# Core dependencies
+numpy>=1.24.0
+scipy>=1.10.0
+matplotlib>=3.7.0
+pyyaml>=6.0
+
+# Gaussian Process backends (user can choose)
+scikit-learn>=1.3.0
+GPy>=1.10.0
+# gpytorch>=1.11.0  # Uncomment if using PyTorch backend
+
+# Real-world data support
+netCDF4>=1.6.0  # For ROMS ocean data and other NetCDF datasets
+
+# Spatial data structures
+rtree>=1.0.0  # For spatial indexing (optional)
+
+# Utilities
+tqdm>=4.65.0  # Progress bars
+pandas>=2.0.0  # Data management
+seaborn>=0.12.0  # Visualization
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0

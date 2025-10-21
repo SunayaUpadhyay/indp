@@ -1,0 +1,144 @@
+# Default configuration for IPP Multi-Robot Framework
+# All parameters can be overridden in experiment-specific configs
+
+# Environment settings
+environment:
+  # Spatial bounds [x_min, x_max, y_min, y_max]
+  bounds: [0, 100, 0, 100]
+  # Ground truth function type: 'synthetic', 'real_data', 'custom'
+  type: "synthetic"
+  # If synthetic, which function? 'peaks', 'ackley', 'rastrigin', etc.
+  function: "peaks"
+  # Noise level in observations
+  observation_noise: 0.1
+  # Random seed for environment generation
+  seed: 42
+
+# Gaussian Process settings
+gp:
+  # GP backend: 'sklearn', 'gpy', 'gpytorch', 'custom'
+  backend: "sklearn"
+  # Kernel type: 'rbf', 'matern', 'rational_quadratic'
+  kernel_type: "rbf"
+  # Kernel hyperparameters (backend-specific)
+  length_scale: 10.0
+  variance: 1.0
+  # Whether to optimize hyperparameters during updates
+  optimize_hyperparams: false
+  # For scalable GP: use inducing points/sparse methods
+  sparse: false
+  n_inducing_points: 100
+  # Initial prior mean
+  prior_mean: 0.0
+
+# Robot settings
+robots:
+  # Number of robots
+  n_robots: 3
+  # Initial positions: 'random', 'grid', 'custom', or list of [x, y] positions
+  initial_positions: "random"
+  # If custom, provide positions
+  custom_positions: []
+  # Budget type: 'time', 'energy', 'distance'
+  budget_type: "distance"
+  # Budget amount per robot (can be list for heterogeneous budgets)
+  budget_amount: 500.0
+  # Max speed/velocity
+  max_speed: 1.0
+  # Sensor range (if applicable)
+  sensor_range: 5.0
+  # Safety buffer between robots
+  safety_buffer: 5.0
+
+# Planning settings
+planning:
+  # Planning window length (how far ahead to plan)
+  window_length: 50.0
+  # Execution step size (how much to execute before replanning)
+  execution_step: 10.0
+  # Maximum mission time (global termination condition)
+  max_mission_time: 1000.0
+
+  # Step A: Candidate generation
+  candidates:
+    # Method: 'quadtree', 'grid', 'frontier', 'random', 'hybrid'
+    method: "quadtree"
+    # Quadtree refinement settings
+    quadtree:
+      max_depth: 6
+      min_cell_size: 2.0
+      # Variance threshold for splitting cells
+      variance_threshold: 0.1
+    # Number of candidates per cell
+    points_per_cell: 1
+    # Include cell corners in addition to centers
+    include_corners: false
+    # Minimum distance between candidates (diversity)
+    min_spacing: 5.0
+    # Feasibility check settings
+    feasibility:
+      check_obstacles: false
+      check_kinematics: true
+      check_budget: true
+
+  # Step B: Assignment (Kriging Believer)
+  assignment:
+    # Robot ordering strategy: 'id', 'closest_to_high_variance', 'least_budget'
+    ordering_strategy: "id"
+    # Acquisition function: 'variance', 'ucb', 'ei', 'poi', 'mes'
+    acquisition_function: "ucb"
+    # Acquisition function parameters
+    acquisition_params:
+      kappa: 2.0 # For UCB
+      xi: 0.01 # For EI/POI
+    # Remove nearby candidates after assignment (exclusion radius)
+    exclusion_radius: 10.0
+
+  # Step C: MCTS planning
+  mcts:
+    # Number of MCTS iterations per planning cycle
+    n_iterations: 1000
+    # Exploration constant for UCT
+    exploration_constant: 1.414
+    # Maximum tree depth
+    max_depth: 5
+    # Rollout policy: 'greedy', 'random', 'epsilon_greedy'
+    rollout_policy: "greedy"
+    # Rollout horizon (steps to simulate in rollout)
+    rollout_horizon: 3
+    # Action selection: 'max_visits', 'max_value', 'robust_child'
+    final_selection: "max_visits"
+    # Fast belief updates during simulation (variance-only)
+    fast_updates: true
+    # Reward components and weights
+    reward:
+      variance_reduction_weight: 1.0
+      distance_penalty_weight: 0.01
+      collision_penalty: -10.0
+      boundary_penalty: -5.0
+
+# Execution and update settings
+execution:
+  # Update strategy: 'batch', 'sequential', 'online'
+  update_strategy: "batch"
+  # Measurement noise model
+  measurement_noise: 0.1
+  # GP update method: 'exact', 'sparse', 'local'
+  gp_update_method: "exact"
+
+# Logging and output
+logging:
+  # Verbosity level: 'debug', 'info', 'warning', 'error'
+  level: "info"
+  # Save trajectories
+  save_trajectories: true
+  # Save GP snapshots at intervals
+  save_gp_snapshots: true
+  snapshot_interval: 10
+  # Save metrics
+  save_metrics: true
+  # Output directory
+  output_dir: "results"
+
+# Random seed for reproducibility (global)
+random_seed: 42
