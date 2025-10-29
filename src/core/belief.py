@@ -8,7 +8,7 @@ Design rationale:
 - Abstract interface allows swapping GP implementations
 - Supports exact and sparse/approximate methods
 - Efficient variance-only updates for MCTS simulation
--Kriging Believer virtual updates for coordination
+- Kriging Believer virtual updates for coordination
 """
 
 import numpy as np

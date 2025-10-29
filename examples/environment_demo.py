@@ -5,6 +5,12 @@ This script demonstrates how to create and use the various benchmark
 environments available in the IPP framework.
 """
 
+import sys
+from pathlib import Path
+
+# Add parent directory to path so we can import from src
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import numpy as np
 import matplotlib.pyplot as plt
 from src.core.environment import create_environment
@@ -145,29 +151,85 @@ def demo_netcdf_environment():
     print("\nNote: NetCDF4 must be installed: pip install netCDF4")
 
 
-def visualize_environments(envs, titles):
-    """Visualize multiple environments side by side."""
+def visualize_environments(envs, titles, plot_3d=True, normalize=False):
+    """
+    Visualize multiple environments side by side.
+    
+    Args:
+        envs: List of environment objects
+        titles: List of titles for each environment
+        plot_3d: If True, create 3D surface plots; if False, create 2D contour plots
+        normalize: If True, normalize Z values to [0, 1] for comparison
+    """
     n_envs = len(envs)
-    fig, axes = plt.subplots(1, n_envs, figsize=(5*n_envs, 4))
     
-    if n_envs == 1:
-        axes = [axes]
-    
-    for i, (env, title) in enumerate(zip(envs, titles)):
-        X, Y, Z = env.evaluate_grid(resolution=100)
+    if plot_3d:
+        # 3D surface plots
+        fig = plt.figure(figsize=(5*n_envs, 5))
         
-        ax = axes[i]
-        contour = ax.contourf(X, Y, Z, levels=20, cmap='viridis')
-        ax.set_xlabel('X')
-        ax.set_ylabel('Y')
-        ax.set_title(title)
-        ax.set_aspect('equal')
-        plt.colorbar(contour, ax=ax)
-    
-    plt.tight_layout()
-    plt.savefig('results/environment_examples.png', dpi=150, bbox_inches='tight')
-    print("\nVisualization saved to: results/environment_examples.png")
-    plt.show()
+        for i, (env, title) in enumerate(zip(envs, titles)):
+            X, Y, Z = env.evaluate_grid(resolution=100)
+            
+            # Optional normalization
+            if normalize:
+                Z = (Z - Z.min()) / (Z.max() - Z.min())
+                title = f"{title} (Normalized)"
+            
+            ax = fig.add_subplot(1, n_envs, i+1, projection='3d')
+            surf = ax.plot_surface(X, Y, Z, cmap='viridis', 
+                                   edgecolor='none', alpha=0.9,
+                                   antialiased=True)
+            
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+            ax.set_zlabel('Z Value')
+            ax.set_title(title)
+            ax.view_init(elev=25, azim=45)  # Nice viewing angle
+            
+            # Add colorbar
+            fig.colorbar(surf, ax=ax, shrink=0.5, aspect=5)
+        
+        plt.tight_layout()
+        filename = 'results/environment_examples_3d.png'
+        if normalize:
+            filename = 'results/environment_examples_3d_normalized.png'
+        plt.savefig(filename, dpi=150, bbox_inches='tight')
+        print(f"\n3D Visualization saved to: {filename}")
+        plt.show()
+        
+    else:
+        # 2D contour plots
+        fig, axes = plt.subplots(1, n_envs, figsize=(5*n_envs, 4))
+        
+        if n_envs == 1:
+            axes = [axes]
+        
+        for i, (env, title) in enumerate(zip(envs, titles)):
+            X, Y, Z = env.evaluate_grid(resolution=100)
+            
+            # Optional normalization
+            if normalize:
+                Z = (Z - Z.min()) / (Z.max() - Z.min())
+                title = f"{title} (Normalized)"
+            
+            ax = axes[i]
+            contour = ax.contourf(X, Y, Z, levels=20, cmap='viridis')
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+            ax.set_title(title)
+            ax.set_aspect('equal')
+            
+            # Add colorbar with value range
+            cbar = plt.colorbar(contour, ax=ax)
+            cbar.set_label('Value')
+        
+        plt.tight_layout()
+        filename = 'results/environment_examples_2d.png'
+        if normalize:
+            filename = 'results/environment_examples_2d_normalized.png'
+        plt.savefig(filename, dpi=150, bbox_inches='tight')
+        print(f"\n2D Visualization saved to: {filename}")
+        plt.show()
 
 
 def test_noisy_observations():
@@ -222,7 +284,17 @@ if __name__ == '__main__':
     envs_to_plot = [env_peaks, env_townsend, env_sar, env_ackley]
     titles = ['Peaks', 'Townsend', 'Gaussian Mixture (S&R)', 'Ackley']
     
-    visualize_environments(envs_to_plot, titles)
+    # Create 2D contour plots (original scale)
+    print("\nCreating 2D contour plots (original scale)...")
+    visualize_environments(envs_to_plot, titles, plot_3d=False, normalize=False)
+    
+    # Create 3D surface plots (original scale)
+    print("\nCreating 3D surface plots (original scale)...")
+    visualize_environments(envs_to_plot, titles, plot_3d=True, normalize=False)
+    
+    # Optional: Create normalized versions for comparison
+    print("\nCreating normalized 3D plots for comparison...")
+    visualize_environments(envs_to_plot, titles, plot_3d=True, normalize=True)
     
     print("\n" + "=" * 60)
     print("SUMMARY")

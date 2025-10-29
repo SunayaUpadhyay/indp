@@ -282,7 +282,14 @@ class SyntheticEnvironment(Environment):
         if X.shape[1] != 2:
             raise ValueError("Townsend function requires 2D input")
         
-        x1, x2 = X[:, 0], X[:, 1]
+        # Scale from current bounds to Townsend domain
+        x_min, x_max = self.bounds[0]
+        y_min, y_max = self.bounds[1]
+        
+        x_scaled = -2.25 + (X[:, 0] - x_min) / (x_max - x_min) * (2.5 - (-2.25))
+        y_scaled = -2.5 + (X[:, 1] - y_min) / (y_max - y_min) * (1.75 - (-2.5))
+        
+        x1, x2 = x_scaled, y_scaled
         
         # Main function
         term1 = -(np.cos((x1 - 0.1) * x2))**2
