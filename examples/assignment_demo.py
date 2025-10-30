@@ -6,10 +6,13 @@ This example demonstrates the complete two-step process:
 2. Step B: Assign targets using kriging believer for conflict-free coordination
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
-from pathlib import Path
 
 from src.core.environment import create_environment
 from src.core.belief import create_gp_belief
@@ -69,11 +72,11 @@ def visualize_assignment_results(
     mean = mean.reshape(X.shape)
     variance = (std ** 2).reshape(X.shape)
     
-    # Create figure
-    fig = plt.figure(figsize=(20, 12))
+    # Create figure with 3 rows x 3 columns
+    fig = plt.figure(figsize=(20, 16))
     
     # 1. Ground truth
-    ax1 = fig.add_subplot(2, 3, 1, projection='3d')
+    ax1 = fig.add_subplot(3, 3, 1, projection='3d')
     surf1 = ax1.plot_surface(X_true, Y_true, true_values, cmap='viridis',
                               linewidth=0, antialiased=True, alpha=0.95)
     
@@ -82,7 +85,7 @@ def visualize_assignment_results(
     for robot_samples in samples.values():
         for pos, val, time in robot_samples:
             all_sample_positions.append(pos)
-    if all_sample_positions:
+    if len(all_sample_positions) > 0:
         all_sample_positions = np.array(all_sample_positions)
         sample_values = env.evaluate(all_sample_positions)
         ax1.scatter(all_sample_positions[:, 0], all_sample_positions[:, 1], sample_values,
@@ -96,10 +99,10 @@ def visualize_assignment_results(
     fig.colorbar(surf1, ax=ax1, shrink=0.5, aspect=10, pad=0.05)
     
     # 2. GP mean after assignment
-    ax2 = fig.add_subplot(2, 3, 2, projection='3d')
+    ax2 = fig.add_subplot(3, 3, 2, projection='3d')
     surf2 = ax2.plot_surface(X, Y, mean, cmap='viridis',
                               linewidth=0, antialiased=True, alpha=0.95)
-    if all_sample_positions:
+    if len(all_sample_positions) > 0:
         gp_sample_mean, _ = gp.predict(all_sample_positions)
         ax2.scatter(all_sample_positions[:, 0], all_sample_positions[:, 1], gp_sample_mean,
                    c='red', s=30, marker='o', edgecolors='black', linewidths=0.8, zorder=10)
@@ -112,7 +115,7 @@ def visualize_assignment_results(
     fig.colorbar(surf2, ax=ax2, shrink=0.5, aspect=10, pad=0.05)
     
     # 3. GP variance
-    ax3 = fig.add_subplot(2, 3, 3, projection='3d')
+    ax3 = fig.add_subplot(3, 3, 3, projection='3d')
     surf3 = ax3.plot_surface(X, Y, variance, cmap='YlOrRd',
                               linewidth=0, antialiased=True, alpha=0.95)
     ax3.set_xlabel('X', labelpad=8)
@@ -123,7 +126,7 @@ def visualize_assignment_results(
     fig.colorbar(surf3, ax=ax3, shrink=0.5, aspect=10, pad=0.05)
     
     # 4. All robot trajectories
-    ax4 = fig.add_subplot(2, 3, 4)
+    ax4 = fig.add_subplot(3, 3, 4)
     ax4.contourf(X, Y, variance, levels=20, cmap='YlOrRd', alpha=0.35)
     
     for robot, color in zip(robots, COLORS):
@@ -157,9 +160,9 @@ def visualize_assignment_results(
     ax4.legend(loc='upper left')
     ax4.grid(True, alpha=0.2)
     
-    # 5-7. Individual robot details
+    # 5-7. Individual robot details (subplots 5, 6, 7)
     for idx, (robot, color) in enumerate(zip(robots, COLORS)):
-        ax = fig.add_subplot(2, 3, 5 + idx)
+        ax = fig.add_subplot(3, 3, 5 + idx)
         ax.contourf(X, Y, variance, levels=20, cmap='YlOrRd', alpha=0.3)
         
         robot_id = robot.id
@@ -224,8 +227,8 @@ def visualize_assignment_results(
 def demo_assignment(
     env_name='townsend',
     bounds=None,
-    n_init=35,
-    time_limit=1800,  # 30 minutes
+    n_init=1,
+    time_limit=200,  # 200 seconds
     seed=42
 ):
     """
@@ -257,7 +260,7 @@ def demo_assignment(
     print(f"{'='*70}")
     
     # Create environment and GP belief
-    env = create_environment(env_name, bounds)
+    env = create_environment(bounds, env_type='synthetic', function_name=env_name)
     init_points = np.random.uniform(
         [bounds[0, 0], bounds[1, 0]],
         [bounds[0, 1], bounds[1, 1]],
@@ -268,15 +271,18 @@ def demo_assignment(
                           variance=1.0, noise=0.1)
     gp.update(init_points, init_values)
     
-    # Create robots
+    # Create robots with TIME budgets
+    # Environment is 100x100 units (treat as 100m x 100m, so 1 unit = 1 meter)
+    # Each robot has 30 minutes (1800 seconds) of operational time
+    # Robot speed is 1.0 m/s, so distance-to-time conversion: time = distance / speed
     robot_configs = [
-        ([25, 25], 30.0),  # Robot 0: start at (25,25), max distance 30
-        ([75, 25], 30.0),  # Robot 1: start at (75,25), max distance 30
-        ([50, 75], 30.0),  # Robot 2: start at (50,75), max distance 30
+        ([0, 0], 200.0),  # Robot 0: start at (0,0), max time 200s
+        ([0, 0], 200.0),  # Robot 1: start at (0,0), max time 200s
+        ([0, 0], 200.0),  # Robot 2: start at (0,0), max time 200s
     ]
     
     robots = [
-        Robot(i, np.array(pos), BudgetType.DISTANCE, budget)
+        Robot(i, np.array(pos), BudgetType.TIME, budget, max_speed=1.0)
         for i, (pos, budget) in enumerate(robot_configs)
     ]
     
@@ -286,14 +292,12 @@ def demo_assignment(
     
     # Generate candidates
     generator = CandidateGenerator(
-        gp_belief=gp,
         bounds=bounds,
-        min_variance=0.01,
-        max_depth=8,
-        min_cell_size=2.0
+        quadtree_config={'max_depth': 8, 'min_cell_size': 2.0, 'variance_threshold': 0.01},
+        sampling_config={'method': 'grid', 'points_per_cell': 4, 'min_spacing': 7.0}
     )
     
-    candidate_sets = generator.generate_candidates(robots)
+    candidate_sets = generator.generate_candidates(gp, robots)
     
     print(f"\nCandidate generation complete:")
     print(f"  Quadtree cells: {generator.quadtree.n_leaves}")
@@ -303,16 +307,18 @@ def demo_assignment(
         feasible = cand_set.get_feasible_points()
         print(f"  Robot {robot_id}: {len(feasible)}/{len(cand_set.points)} feasible candidates")
     
-    # === STEP B: KRIGING BELIEVER ASSIGNMENT ===
     print(f"\n{'='*70}")
     print(f"STEP B: KRIGING BELIEVER ASSIGNMENT")
     print(f"{'='*70}")
     
-    # Create assignment algorithm
+    # Create assignment algorithm with TIME-based thresholds
+    # Robots have 200s time budget, speed is 1.0 m/s
+    # Reserve at least 5s for potential target assignment
+    # Sensor takes 1s to collect a measurement
     assigner = KrigingBelieverAssignment(
-        time_limit=time_limit,
-        min_time_threshold=60.0,
-        sensor_time=5.0,
+        time_limit=200.0,  # 200 seconds total mission time
+        min_time_threshold=5.0,  # Reserve 5s minimum for new assignments
+        sensor_time=1.0,  # 1 second to take a measurement
         verbose=True
     )
     

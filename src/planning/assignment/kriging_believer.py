@@ -180,6 +180,11 @@ class KrigingBelieverAssignment:
         self.gp_believer = deepcopy(gp_belief)
         
         # Initialize robot states and take initial samples
+        if self.verbose:
+            print(f"\n{'='*70}")
+            print(f"INITIALIZATION - ROBOTS TAKING INITIAL SAMPLES")
+            print(f"{'='*70}")
+        
         for robot in robots:
             # Create assignment state
             state = RobotAssignmentState(robot=robot)
@@ -196,6 +201,13 @@ class KrigingBelieverAssignment:
             # Add to global samples
             self.global_samples.append((robot.position.copy(), initial_value, initial_time, robot.id))
             
+            if self.verbose:
+                print(f"\n  Robot {robot.id}:")
+                print(f"    Starting Position: {robot.position}")
+                print(f"    Initial Measurement: {initial_value:.3f}")
+                print(f"    Sensor Time: {self.sensor_time:.1f}s")
+                print(f"    Budget Remaining: {robot.remaining_budget:.1f}s")
+            
         # Update actual GP with initial samples
         if self.global_samples:
             positions = np.array([s[0] for s in self.global_samples])
@@ -204,12 +216,14 @@ class KrigingBelieverAssignment:
             self.gp_believer = deepcopy(self.gp_actual)
             
         if self.verbose:
-            print(f"\n{'='*60}")
-            print(f"KRIGING BELIEVER ASSIGNMENT - STEP B")
-            print(f"{'='*60}")
-            print(f"Time limit: {self.time_limit:.1f}s")
-            print(f"Robots: {len(robots)}")
-            print(f"Initial samples collected: {len(self.global_samples)}")
+            print(f"\n{'='*70}")
+            print(f"STARTING KRIGING BELIEVER ASSIGNMENT")
+            print(f"{'='*70}")
+            print(f"Time Limit:     {self.time_limit:.1f}s ({self.time_limit/60:.1f} minutes)")
+            print(f"Min Threshold:  {self.min_time_threshold:.1f}s")
+            print(f"Sensor Time:    {self.sensor_time:.1f}s")
+            print(f"Initial Samples: {len(self.global_samples)}")
+            print(f"\nNow assigning initial targets to all robots...")
     
     def _assign_next_target(
         self,
@@ -228,14 +242,17 @@ class KrigingBelieverAssignment:
         # Check if robot has sufficient budget
         if robot.remaining_budget <= self.min_time_threshold:
             if self.verbose:
-                print(f"  Robot {robot_id}: Insufficient budget ({robot.remaining_budget:.1f}s)")
+                print(f"\n  [ROBOT {robot_id}] Cannot assign new target - Insufficient budget")
+                print(f"    Budget Remaining: {robot.remaining_budget:.1f}s (need >{self.min_time_threshold:.1f}s)")
+                print(f"    Robot is DONE exploring")
             return False
         
         # Get feasible candidates
         feasible = candidate_set.get_feasible_points()
         if len(feasible) == 0:
             if self.verbose:
-                print(f"  Robot {robot_id}: No feasible candidates remaining")
+                print(f"\n  [ROBOT {robot_id}] Cannot assign new target - No feasible candidates")
+                print(f"    Robot is DONE exploring")
             return False
         
         # Remove already-targeted points
@@ -247,7 +264,9 @@ class KrigingBelieverAssignment:
         
         if len(available) == 0:
             if self.verbose:
-                print(f"  Robot {robot_id}: All candidates already targeted")
+                print(f"\n  [ROBOT {robot_id}] Cannot assign new target - All candidates already targeted")
+                print(f"    Feasible: {len(feasible)}, Already Targeted: {len(feasible)}")
+                print(f"    Robot is DONE exploring")
             return False
         
         # Select best target using acquisition function (or default)
@@ -281,7 +300,14 @@ class KrigingBelieverAssignment:
         self._update_kriging_believer()
         
         if self.verbose:
-            print(f"  Robot {robot_id}: Target {target} assigned (travel: {travel_time:.1f}s, arrival: {event_time:.1f}s)")
+            print(f"\n  [Time {self.simulation_clock:.1f}s] ROBOT {robot_id} - NEW TARGET ASSIGNED")
+            print(f"    Current Position: {robot.position}")
+            print(f"    Target Position:  {target}")
+            print(f"    Distance:         {distance:.2f} units")
+            print(f"    Travel Time:      {travel_time:.1f}s")
+            print(f"    Arrival Time:     {event_time:.1f}s")
+            print(f"    Budget Remaining: {robot.remaining_budget:.1f}s")
+            print(f"    Total Targets:    {len(state.assigned_targets)}")
         
         return True
     
@@ -389,9 +415,17 @@ class KrigingBelieverAssignment:
         self.gp_actual.update(positions, values)
         
         if self.verbose:
-            print(f"\nTime {event.time:.1f}s: Robot {robot.id} reached {event.position}")
-            print(f"  Measurement: {measurement_value:.3f}")
-            print(f"  Remaining budget: {robot.remaining_budget:.1f}s")
+            print(f"\n{'='*70}")
+            print(f"[Time {event.time:.1f}s] ROBOT {robot.id} - ARRIVED AT TARGET")
+            print(f"{'='*70}")
+            print(f"  Position:         {event.position}")
+            print(f"  Measurement:      {measurement_value:.3f}")
+            print(f"  Travel Time:      {travel_time:.1f}s")
+            print(f"  Sensor Time:      {self.sensor_time:.1f}s")
+            print(f"  Budget Used:      {travel_time + self.sensor_time:.1f}s")
+            print(f"  Budget Remaining: {robot.remaining_budget:.1f}s")
+            print(f"  Samples So Far:   {len(state.samples_collected)}")
+            print(f"  Total Samples:    {len(self.global_samples)}")
         
         # Assign next target if robot still has budget
         self._assign_next_target(robot.id, candidate_sets[robot.id])
