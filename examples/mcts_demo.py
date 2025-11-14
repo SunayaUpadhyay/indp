@@ -14,6 +14,11 @@ The demo shows:
 3. MCTS tree building process with detailed visualization
 4. Node exploration statistics
 5. Best path extraction and execution
+
+UNITS:
+  - All distances in METERS
+  - All times in SECONDS
+  - Speeds in METERS/SECOND
 """
 
 import sys
@@ -28,6 +33,7 @@ from src.core.environment import create_environment
 from src.core.robot import Robot, BudgetType
 from src.core.belief import create_gp_belief
 from src.planning import CandidateGenerator, MCTSPlanner, MCTSConfig, MCTSNode
+from config.units import print_environment_info
 
 
 def collect_tree_statistics(root: MCTSNode):
@@ -715,11 +721,13 @@ def demo_mcts_planning():
     print(f"MCTS PLANNING DEMO (STEP C)")
     print(f"{'='*70}\n")
     
-    # Configuration - MATCH assignment_demo.py
-    bounds = np.array([[0, 100], [0, 100]])
-    env_name = 'townsend'  # Same as assignment demo
-    n_init = 1  # Minimal initial samples like assignment demo
-    time_limit = 200  # 200 seconds mission time
+    # Configuration - medium search area: 1km × 1km
+    bounds = np.array([[0, 100], [0, 100]])  # Coordinate bounds
+    physical_scale = 10.0  # Each coordinate unit = 10 meters  
+    robot_speed_ms = 5.0  # 5 m/s = 18 km/h
+    env_name = 'townsend'
+    n_init = 1  # Minimal initial samples
+    robot_budget = 200.0  # 200 seconds mission time
     sensor_time = 1.0  # 1 second per measurement
     
     # === STEP 0: ENVIRONMENT SETUP ===
@@ -727,12 +735,25 @@ def demo_mcts_planning():
     print(f"STEP 0: ENVIRONMENT SETUP")
     print(f"{'='*70}")
     
-    env = create_environment(bounds, env_type='synthetic', function_name=env_name)
-    print(f"Environment: {env_name}")
-    print(f"Bounds: {bounds[0]} to {bounds[1]}")
+    env = create_environment(
+        bounds=bounds,
+        env_type='synthetic',
+        function_name=env_name,
+        physical_scale=physical_scale
+    )
     
-    # Create initial GP belief - SAME AS ASSIGNMENT DEMO
-    print(f"\nGenerating {n_init} initial samples...")
+    # Print environment information
+    print_environment_info(
+        env_name=env_name,
+        bounds=bounds,
+        physical_scale=physical_scale,
+        robot_speed=robot_speed_ms,
+        robot_budget=robot_budget,
+        budget_type='time'
+    )
+    
+    # Create initial GP belief
+    print(f"Generating {n_init} initial samples...")
     init_points = np.random.uniform(
         [bounds[0, 0], bounds[1, 0]],
         [bounds[0, 1], bounds[1, 1]],
@@ -744,20 +765,25 @@ def demo_mcts_planning():
     gp.update(init_points, init_values)
     print(f"Initial GP trained with {n_init} samples")
     
-    # Create single robot - SAME SETUP AS ASSIGNMENT DEMO
-    robot_start = np.array([50.0, 50.0])  # Start at origin like assignment demo
-    robot_budget = 400.0  # 200 seconds like assignment demo
+    # Create single robot with environment link
+    robot_start = np.array([50.0, 50.0])  # Center of coordinate system
     robot = Robot(
         robot_id=0,
         initial_position=robot_start,
         budget_type=BudgetType.TIME,
-        initial_budget=robot_budget,
-        max_speed=1.0
+        initial_budget=robot_budget,  # seconds
+        max_speed=robot_speed_ms,     # m/s
+        environment=env               # Link for coordinate conversion
     )
+    
+    # Display robot info in physical units
+    phys_pos = robot_start * physical_scale
+    max_distance = robot_budget * robot_speed_ms
     print(f"\nRobot initialized:")
-    print(f"  Position: {robot.position}")
+    print(f"  Position: ({phys_pos[0]:.0f}m, {phys_pos[1]:.0f}m)")
     print(f"  Budget: {robot.remaining_budget:.1f}s ({robot.remaining_budget/60:.1f} min)")
     print(f"  Speed: {robot.max_speed} m/s")
+    print(f"  Max distance: {max_distance:.0f}m")
     
     # === STEP A: CANDIDATE GENERATION ===
     print(f"\n{'='*70}")

@@ -9,9 +9,13 @@ This module defines the Robot class which encapsulates:
 """
 
 import numpy as np
-from typing import Optional, List, Tuple, Dict, Any
+import warnings
+from typing import Optional, List, Tuple, Dict, Any, TYPE_CHECKING
 from dataclasses import dataclass, field
 from enum import Enum
+
+if TYPE_CHECKING:
+    from .environment import Environment
 
 
 class BudgetType(Enum):
@@ -71,6 +75,7 @@ class Robot:
         initial_budget: float = 100.0,
         max_speed: float = 1.0,
         sensor_range: float = 5.0,
+        environment: Optional['Environment'] = None,
         config: Optional[Dict[str, Any]] = None
     ):
         """
@@ -80,9 +85,10 @@ class Robot:
             robot_id: Unique identifier for this robot
             initial_position: Starting [x, y] position
             budget_type: Type of budget constraint
-            initial_budget: Initial budget amount
-            max_speed: Maximum velocity magnitude
-            sensor_range: Sensing radius around robot
+            initial_budget: Initial budget amount (in meters if DISTANCE, seconds if TIME)
+            max_speed: Maximum velocity magnitude (in m/s)
+            sensor_range: Sensing radius around robot (in meters)
+            environment: Environment instance for coordinate conversion
             config: Additional configuration parameters
         """
         self.id = robot_id
@@ -91,7 +97,11 @@ class Robot:
         self.remaining_budget = initial_budget
         self.max_speed = max_speed
         self.sensor_range = sensor_range
+        self.environment = environment
         self.config = config or {}
+        
+        # Validate parameters
+        self._validate_parameters()
         
         # Initialize state
         self.state = RobotState(
@@ -106,6 +116,40 @@ class Robot:
         
         # Measurements collected: list of (position, value, timestamp)
         self.measurements: List[Tuple[np.ndarray, float, float]] = []
+    
+    def _validate_parameters(self) -> None:
+        """Validate robot parameters for physical realism."""
+        # Speed checks (assuming meters/second)
+        if self.max_speed <= 0:
+            raise ValueError(f"max_speed must be positive, got {self.max_speed}")
+        
+        if self.max_speed > 50:  # 180 km/h seems unrealistic for most robots
+            warnings.warn(
+                f"Unusually high max_speed: {self.max_speed} m/s ({self.max_speed*3.6:.1f} km/h). "
+                f"Did you mean km/h? Convert with: speed_ms = speed_kmh / 3.6",
+                UserWarning
+            )
+        
+        # Budget checks
+        if self.initial_budget <= 0:
+            raise ValueError(f"initial_budget must be positive, got {self.initial_budget}")
+        
+        if self.budget_type == BudgetType.DISTANCE:
+            if self.initial_budget > 100000:  # 100 km
+                warnings.warn(
+                    f"Very large distance budget: {self.initial_budget}m ({self.initial_budget/1000:.1f} km)",
+                    UserWarning
+                )
+        elif self.budget_type == BudgetType.TIME:
+            if self.initial_budget > 86400:  # 24 hours
+                warnings.warn(
+                    f"Very large time budget: {self.initial_budget}s ({self.initial_budget/3600:.1f} hours)",
+                    UserWarning
+                )
+        
+        # Sensor range check
+        if self.sensor_range <= 0:
+            warnings.warn(f"sensor_range is {self.sensor_range}, should be positive", UserWarning)
         
     @property
     def position(self) -> np.ndarray:
@@ -141,13 +185,22 @@ class Robot:
             update_budget: Whether to consume budget based on distance
             
         Returns:
-            Distance traveled (budget consumed if applicable)
+            Distance traveled in coordinate units (physical meters if environment attached)
         """
         target_position = np.array(target_position, dtype=float)
-        distance = np.linalg.norm(target_position - self.position)
+        
+        # Calculate distance in coordinate units
+        distance_coords = np.linalg.norm(target_position - self.position)
+        
+        # Convert to physical distance if environment is available
+        if self.environment is not None:
+            distance_physical = self.environment.coord_to_meters(distance_coords)
+        else:
+            # Assume coordinates are already in meters
+            distance_physical = distance_coords
         
         # Update state
-        velocity = (target_position - self.position) / (distance + 1e-10) * self.max_speed
+        velocity = (target_position - self.position) / (distance_coords + 1e-10) * self.max_speed
         heading = np.arctan2(velocity[1], velocity[0])
         
         self.state = RobotState(
@@ -160,19 +213,20 @@ class Robot:
         # Record in trajectory
         self.trajectory.append(self.state)
         
-        # Update budget
+        # Update budget using PHYSICAL distance
         if update_budget:
             if self.budget_type == BudgetType.DISTANCE:
-                self.consume_budget(distance)
+                self.consume_budget(distance_physical)
             elif self.budget_type == BudgetType.TIME:
-                time_cost = distance / self.max_speed
+                # Time = distance / speed (both in physical units)
+                time_cost = distance_physical / self.max_speed
                 self.consume_budget(time_cost)
             elif self.budget_type == BudgetType.ENERGY:
                 # Simple energy model: proportional to distance squared
-                energy_cost = distance ** 2
+                energy_cost = distance_physical ** 2
                 self.consume_budget(energy_cost)
         
-        return distance
+        return distance_physical
     
     def add_measurement(
         self,
@@ -206,16 +260,26 @@ class Robot:
             True if target is reachable within budget
         """
         target_position = np.array(target_position, dtype=float)
-        distance = np.linalg.norm(target_position - self.position)
         
-        if self.budget_type == BudgetType.DISTANCE:
-            required_budget = distance
-        elif self.budget_type == BudgetType.TIME:
-            required_budget = distance / self.max_speed
-        elif self.budget_type == BudgetType.ENERGY:
-            required_budget = distance ** 2
+        # Calculate distance in coordinate units
+        distance_coords = np.linalg.norm(target_position - self.position)
+        
+        # Convert to physical distance if environment is available
+        if self.environment is not None:
+            distance_physical = self.environment.coord_to_meters(distance_coords)
         else:
-            required_budget = distance
+            # Assume coordinates are already in meters
+            distance_physical = distance_coords
+        
+        # Calculate required budget using PHYSICAL distance
+        if self.budget_type == BudgetType.DISTANCE:
+            required_budget = distance_physical
+        elif self.budget_type == BudgetType.TIME:
+            required_budget = distance_physical / self.max_speed
+        elif self.budget_type == BudgetType.ENERGY:
+            required_budget = distance_physical ** 2
+        else:
+            required_budget = distance_physical
         
         return (self.remaining_budget - budget_reserve) >= required_budget
     
@@ -230,17 +294,24 @@ class Robot:
     
     def get_total_distance_traveled(self) -> float:
         """
-        Calculate total distance traveled by robot.
+        Calculate total distance traveled by robot in physical meters.
         
         Returns:
-            Total distance in trajectory
+            Total distance in meters (if environment attached) or coordinate units
         """
         positions = self.get_trajectory_positions()
         if len(positions) < 2:
             return 0.0
         
-        distances = np.linalg.norm(np.diff(positions, axis=0), axis=1)
-        return np.sum(distances)
+        # Calculate distances in coordinate units
+        distances_coords = np.linalg.norm(np.diff(positions, axis=0), axis=1)
+        total_distance_coords = np.sum(distances_coords)
+        
+        # Convert to physical distance if environment is available
+        if self.environment is not None:
+            return self.environment.coord_to_meters(total_distance_coords)
+        else:
+            return total_distance_coords
     
     def reset(self, initial_position: Optional[np.ndarray] = None) -> None:
         """

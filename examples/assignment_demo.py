@@ -4,6 +4,11 @@ Demo of Step A (Candidate Generation) + Step B (Kriging Believer Assignment).
 This example demonstrates the complete two-step process:
 1. Step A: Generate candidate sets for each robot using adaptive quadtree
 2. Step B: Assign targets using kriging believer for conflict-free coordination
+
+UNITS:
+  - All distances in METERS
+  - All times in SECONDS
+  - Speeds in METERS/SECOND
 """
 
 import sys
@@ -19,6 +24,7 @@ from src.core.belief import create_gp_belief
 from src.core.robot import Robot, BudgetType
 from src.planning.candidates.candidate_generator import CandidateGenerator
 from src.planning.assignment import KrigingBelieverAssignment
+from config.units import print_environment_info
 
 
 # Visualization constants
@@ -260,7 +266,12 @@ def demo_assignment(
     print(f"{'='*70}")
     
     # Create environment and GP belief
-    env = create_environment(bounds, env_type='synthetic', function_name=env_name)
+    env = create_environment(
+        bounds=bounds,
+        env_type='synthetic',
+        function_name=env_name,
+        physical_scale=10.0  # Each unit = 10 meters
+    )
     init_points = np.random.uniform(
         [bounds[0, 0], bounds[1, 0]],
         [bounds[0, 1], bounds[1, 1]],
@@ -271,18 +282,18 @@ def demo_assignment(
                           variance=1.0, noise=0.1)
     gp.update(init_points, init_values)
     
-    # Create robots with TIME budgets
-    # Environment is 100x100 units (treat as 100m x 100m, so 1 unit = 1 meter)
-    # Each robot has 30 minutes (1800 seconds) of operational time
-    # Robot speed is 1.0 m/s, so distance-to-time conversion: time = distance / speed
+    # Create robots with TIME budgets and environment link
+    # Robot speed: 2 m/s = 7.2 km/h (ground robot)
+    robot_speed_ms = 2.0
     robot_configs = [
-        ([0, 0], 200.0),  # Robot 0: start at (0,0), max time 200s
-        ([0, 0], 200.0),  # Robot 1: start at (0,0), max time 200s
-        ([0, 0], 200.0),  # Robot 2: start at (0,0), max time 200s
+        ([0, 0], 200.0),  # Robot 0: start at origin, 200s budget
+        ([0, 0], 200.0),  # Robot 1: start at origin, 200s budget
+        ([0, 0], 200.0),  # Robot 2: start at origin, 200s budget
     ]
     
     robots = [
-        Robot(i, np.array(pos), BudgetType.TIME, budget, max_speed=1.0)
+        Robot(i, np.array(pos), BudgetType.TIME, budget,
+              max_speed=robot_speed_ms, environment=env)
         for i, (pos, budget) in enumerate(robot_configs)
     ]
     
@@ -317,6 +328,7 @@ def demo_assignment(
     # Sensor takes 1s to collect a measurement
     assigner = KrigingBelieverAssignment(
         time_limit=200.0,  # 200 seconds total mission time
+        environment=env,  # Pass environment for distance conversions
         min_time_threshold=5.0,  # Reserve 5s minimum for new assignments
         sensor_time=1.0,  # 1 second to take a measurement
         verbose=True

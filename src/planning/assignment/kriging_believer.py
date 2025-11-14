@@ -78,6 +78,7 @@ class KrigingBelieverAssignment:
     def __init__(
         self,
         time_limit: float,
+        environment: 'Environment',
         min_time_threshold: float = 60.0,
         sensor_time: float = 5.0,
         acquisition_function: Optional[Callable] = None,
@@ -88,12 +89,14 @@ class KrigingBelieverAssignment:
         
         Args:
             time_limit: Maximum mission duration (seconds)
+            environment: Environment for coordinate/distance conversions
             min_time_threshold: Minimum remaining time to assign new target (seconds)
             sensor_time: Time required to take a measurement (seconds)
             acquisition_function: Function to select next target (if None, uses default MI)
             verbose: Whether to print progress messages
         """
         self.time_limit = time_limit
+        self.environment = environment
         self.min_time_threshold = min_time_threshold
         self.sensor_time = sensor_time
         self.acquisition_function = acquisition_function
@@ -277,9 +280,18 @@ class KrigingBelieverAssignment:
         else:
             target = self._default_acquisition(available, robot.position)
         
-        # Calculate travel time
-        distance = np.linalg.norm(target - robot.position)
-        travel_time = distance / robot.max_speed
+        # Calculate distance in coordinate units
+        distance_coords = np.linalg.norm(target - robot.position)
+        
+        # Convert to physical meters using environment
+        if robot.environment is not None:
+            distance_meters = robot.environment.coord_to_meters(distance_coords)
+        else:
+            # Fallback: assume coordinates are in meters
+            distance_meters = distance_coords
+        
+        # Calculate travel time using PHYSICAL distance
+        travel_time = distance_meters / robot.max_speed
         
         # Assign target to robot
         state.current_target = target.copy()
@@ -301,13 +313,15 @@ class KrigingBelieverAssignment:
         
         if self.verbose:
             print(f"\n  [Time {self.simulation_clock:.1f}s] ROBOT {robot_id} - NEW TARGET ASSIGNED")
-            print(f"    Current Position: {robot.position}")
-            print(f"    Target Position:  {target}")
-            print(f"    Distance:         {distance:.2f} units")
-            print(f"    Travel Time:      {travel_time:.1f}s")
-            print(f"    Arrival Time:     {event_time:.1f}s")
-            print(f"    Budget Remaining: {robot.remaining_budget:.1f}s")
-            print(f"    Total Targets:    {len(state.assigned_targets)}")
+            print(f"    Current Position:     {robot.position}")
+            print(f"    Target Position:      {target}")
+            print(f"    Distance (coords):    {distance_coords:.2f} units")
+            print(f"    Distance (physical):  {distance_meters:.2f}m")
+            print(f"    Robot Speed:          {robot.max_speed:.1f} m/s")
+            print(f"    Travel Time:          {travel_time:.1f}s")
+            print(f"    Arrival Time:         {event_time:.1f}s")
+            print(f"    Budget Remaining:     {robot.remaining_budget:.1f}s")
+            print(f"    Total Targets:        {len(state.assigned_targets)}")
         
         return True
     
@@ -319,16 +333,30 @@ class KrigingBelieverAssignment:
         """
         Default acquisition: select candidate with highest variance/distance ratio.
         
-        This is a simple heuristic that balances exploration (high variance)
-        with efficiency (low travel distance).
+        This balances exploration (high variance) with efficiency (low travel distance).
+        Uses PHYSICAL distances for fair comparison across different coordinate systems.
         """
+        # Get GP variance predictions
         _, variances = self.gp_believer.predict(candidates, return_std=True)
         variances = variances ** 2  # Convert std to variance
         
-        distances = np.linalg.norm(candidates - current_position, axis=1)
-        distances = np.maximum(distances, 1e-6)  # Avoid division by zero
+        # Calculate distances in coordinate units
+        distances_coords = np.linalg.norm(candidates - current_position, axis=1)
         
-        scores = variances / distances
+        # Convert to physical meters
+        if self.environment is not None:
+            distances_meters = np.array([
+                self.environment.coord_to_meters(d) for d in distances_coords
+            ])
+        else:
+            # Fallback: assume coordinates are in meters
+            distances_meters = distances_coords
+        
+        # Avoid division by zero
+        distances_meters = np.maximum(distances_meters, 1e-6)
+        
+        # Score: variance per meter traveled
+        scores = variances / distances_meters
         best_idx = np.argmax(scores)
         
         return candidates[best_idx]
@@ -391,6 +419,17 @@ class KrigingBelieverAssignment:
         state = self.robot_states[event.robot_id]
         robot = state.robot
         
+        # Calculate distance traveled (for logging)
+        if len(robot.trajectory) >= 2:
+            distance_coords = np.linalg.norm(event.position - robot.trajectory[-2].position)
+            if robot.environment is not None:
+                distance_meters = robot.environment.coord_to_meters(distance_coords)
+            else:
+                distance_meters = distance_coords
+        else:
+            distance_coords = 0.0
+            distance_meters = 0.0
+        
         # Move robot to target
         travel_time = state.time_to_target
         robot.consume_budget(travel_time)
@@ -418,14 +457,15 @@ class KrigingBelieverAssignment:
             print(f"\n{'='*70}")
             print(f"[Time {event.time:.1f}s] ROBOT {robot.id} - ARRIVED AT TARGET")
             print(f"{'='*70}")
-            print(f"  Position:         {event.position}")
-            print(f"  Measurement:      {measurement_value:.3f}")
-            print(f"  Travel Time:      {travel_time:.1f}s")
-            print(f"  Sensor Time:      {self.sensor_time:.1f}s")
-            print(f"  Budget Used:      {travel_time + self.sensor_time:.1f}s")
-            print(f"  Budget Remaining: {robot.remaining_budget:.1f}s")
-            print(f"  Samples So Far:   {len(state.samples_collected)}")
-            print(f"  Total Samples:    {len(self.global_samples)}")
+            print(f"  Position:             {event.position}")
+            print(f"  Measurement:          {measurement_value:.3f}")
+            print(f"  Distance Traveled:    {distance_meters:.2f}m")
+            print(f"  Travel Time:          {travel_time:.1f}s")
+            print(f"  Sensor Time:          {self.sensor_time:.1f}s")
+            print(f"  Budget Used:          {travel_time + self.sensor_time:.1f}s")
+            print(f"  Budget Remaining:     {robot.remaining_budget:.1f}s")
+            print(f"  Samples So Far:       {len(state.samples_collected)}")
+            print(f"  Total Samples:        {len(self.global_samples)}")
         
         # Assign next target if robot still has budget
         self._assign_next_target(robot.id, candidate_sets[robot.id])

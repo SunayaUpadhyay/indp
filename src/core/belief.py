@@ -23,6 +23,10 @@ class GaussianProcessBelief(ABC):
     
     This provides a common interface for different GP backends while
     allowing efficient implementations for each.
+    
+    IMPORTANT: GP internally works in NORMALIZED [0,1] coordinates for numerical
+    stability. User-facing methods (predict, update) accept original coordinates
+    and handle conversion automatically.
     """
     
     def __init__(
@@ -33,19 +37,21 @@ class GaussianProcessBelief(ABC):
         variance: float = 1.0,
         noise: float = 0.1,
         prior_mean: float = 0.0,
-        config: Optional[Dict[str, Any]] = None
+        config: Optional[Dict[str, Any]] = None,
+        use_normalized_coords: bool = True
     ):
         """
         Initialize GP belief.
         
         Args:
-            bounds: Spatial bounds [[x_min, x_max], [y_min, y_max]]
+            bounds: Spatial bounds [[x_min, x_max], [y_min, y_max]] in original coordinates
             kernel_type: Type of kernel ('rbf', 'matern', etc.)
-            length_scale: Kernel length scale parameter
+            length_scale: Kernel length scale parameter (in normalized coords if use_normalized=True)
             variance: Kernel variance parameter
             noise: Observation noise level
             prior_mean: Prior mean value
             config: Additional configuration
+            use_normalized_coords: If True, internally work in [0,1] space for numerical stability
         """
         self.bounds = np.array(bounds)
         self.kernel_type = kernel_type
@@ -54,10 +60,51 @@ class GaussianProcessBelief(ABC):
         self.noise = noise
         self.prior_mean = prior_mean
         self.config = config or {}
+        self.use_normalized_coords = use_normalized_coords
         
-        # Training data
+        # Calculate normalization parameters
+        self.coord_range = self.bounds[:, 1] - self.bounds[:, 0]
+        self.coord_min = self.bounds[:, 0]
+        
+        # Internal bounds (always [0,1] if normalized)
+        if use_normalized_coords:
+            self.internal_bounds = np.array([[0, 1], [0, 1]])
+        else:
+            self.internal_bounds = self.bounds.copy()
+        
+        # Training data (stored in INTERNAL coordinates for numerical stability)
         self.X_train: Optional[np.ndarray] = None
         self.y_train: Optional[np.ndarray] = None
+    
+    def to_internal(self, X: np.ndarray) -> np.ndarray:
+        """
+        Convert from original coordinates to internal (possibly normalized).
+        
+        Args:
+            X: Points in original coordinate system, shape (n, 2)
+            
+        Returns:
+            Points in internal coordinate system, shape (n, 2)
+        """
+        if not self.use_normalized_coords:
+            return X
+        X = np.atleast_2d(X)
+        return (X - self.coord_min) / self.coord_range
+    
+    def from_internal(self, X_internal: np.ndarray) -> np.ndarray:
+        """
+        Convert from internal coordinates to original.
+        
+        Args:
+            X_internal: Points in internal system, shape (n, 2)
+            
+        Returns:
+            Points in original coordinate system, shape (n, 2)
+        """
+        if not self.use_normalized_coords:
+            return X_internal
+        X_internal = np.atleast_2d(X_internal)
+        return X_internal * self.coord_range + self.coord_min
         
     @abstractmethod
     def predict(
@@ -68,8 +115,11 @@ class GaussianProcessBelief(ABC):
         """
         Predict mean and optionally standard deviation at test points.
         
+        NOTE: Accepts X in ORIGINAL coordinates. Subclasses must convert to
+        internal coordinates using self.to_internal(X) before GP operations.
+        
         Args:
-            X: Test points of shape (n_points, n_dims)
+            X: Test points in ORIGINAL coordinates, shape (n_points, n_dims)
             return_std: Whether to return standard deviation
             
         Returns:
@@ -88,8 +138,11 @@ class GaussianProcessBelief(ABC):
         """
         Update GP with new observations.
         
+        NOTE: Accepts X_new in ORIGINAL coordinates. Subclasses must convert to
+        internal coordinates using self.to_internal(X_new) before storing.
+        
         Args:
-            X_new: New observation locations of shape (n_new, n_dims)
+            X_new: New observation locations in ORIGINAL coordinates, shape (n_new, n_dims)
             y_new: New observation values of shape (n_new,)
             optimize: Whether to optimize hyperparameters
         """
@@ -239,20 +292,27 @@ class SKLearnGPBelief(GaussianProcessBelief):
         X: np.ndarray,
         return_std: bool = True
     ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-        """Predict using scikit-learn GP."""
+        """
+        Predict using scikit-learn GP.
+        
+        Accepts X in ORIGINAL coordinates, converts to internal for prediction.
+        """
         X = np.atleast_2d(X)
+        
+        # Convert to internal coordinates
+        X_internal = self.to_internal(X)
         
         if not self._is_fitted:
             # Return prior
-            mean = np.full(len(X), self.prior_mean)
-            std = np.full(len(X), np.sqrt(self.variance)) if return_std else None
+            mean = np.full(len(X_internal), self.prior_mean)
+            std = np.full(len(X_internal), np.sqrt(self.variance)) if return_std else None
             return mean, std
         
         if return_std:
-            mean, std = self.gp.predict(X, return_std=True)
+            mean, std = self.gp.predict(X_internal, return_std=True)
             return mean, std
         else:
-            mean = self.gp.predict(X, return_std=False)
+            mean = self.gp.predict(X_internal, return_std=False)
             return mean, None
     
     def update(
@@ -261,19 +321,26 @@ class SKLearnGPBelief(GaussianProcessBelief):
         y_new: np.ndarray,
         optimize: bool = False
     ) -> None:
-        """Update scikit-learn GP with new data."""
+        """
+        Update scikit-learn GP with new data.
+        
+        Accepts X_new in ORIGINAL coordinates, converts to internal before storing.
+        """
         X_new = np.atleast_2d(X_new)
         y_new = np.atleast_1d(y_new)
         
-        # Append to training data
+        # Convert to internal coordinates
+        X_new_internal = self.to_internal(X_new)
+        
+        # Append to training data (stored in internal coordinates)
         if self.X_train is None:
-            self.X_train = X_new.copy()
+            self.X_train = X_new_internal.copy()
             self.y_train = y_new.copy()
         else:
-            self.X_train = np.vstack([self.X_train, X_new])
+            self.X_train = np.vstack([self.X_train, X_new_internal])
             self.y_train = np.hstack([self.y_train, y_new])
         
-        # Refit GP
+        # Refit GP with internal coordinates
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")  # Suppress sklearn warnings
             self.gp.fit(self.X_train, self.y_train)
@@ -284,6 +351,25 @@ class SKLearnGPBelief(GaussianProcessBelief):
         """Create a deep copy."""
         import copy as copy_module
         return copy_module.deepcopy(self)
+    
+    def get_training_info(self) -> Dict[str, Any]:
+        """Get information about training data and coordinate system."""
+        info = {
+            'n_train': len(self.X_train) if self.X_train is not None else 0,
+            'is_fitted': self._is_fitted,
+            'use_normalized': self.use_normalized_coords,
+            'bounds_original': self.bounds,
+            'bounds_internal': self.internal_bounds,
+            'coord_range': self.coord_range,
+        }
+        
+        if self.X_train is not None:
+            info['X_train_min'] = self.X_train.min(axis=0)
+            info['X_train_max'] = self.X_train.max(axis=0)
+            info['y_train_mean'] = self.y_train.mean()
+            info['y_train_std'] = self.y_train.std()
+        
+        return info
 
 
 # Factory function for creating GP beliefs
@@ -295,10 +381,27 @@ def create_gp_belief(
     """
     Factory function to create GP belief with specified backend.
     
+    NOTE: By default, GP beliefs use normalized [0,1] coordinates internally
+    for numerical stability. Pass use_normalized_coords=False to disable.
+    
     Args:
-        bounds: Spatial bounds
+        bounds: Spatial bounds in original coordinates
         backend: Which GP backend to use
         **kwargs: Additional parameters passed to GP constructor
+        
+    Returns:
+        GaussianProcessBelief instance
+        
+    Example:
+        >>> gp = create_gp_belief(
+        ...     bounds=np.array([[-2.25, 2.5], [-2.5, 1.75]]),
+        ...     kernel_type='matern',
+        ...     length_scale=0.1,  # In normalized space
+        ...     use_normalized_coords=True  # Default
+        ... )
+        >>> # User always passes original coordinates
+        >>> gp.update(X_new=[[-2.0, -2.0]], y_new=[0.5])
+        >>> mean, std = gp.predict([[0.0, 0.0]])
         
     Returns:
         GaussianProcessBelief instance

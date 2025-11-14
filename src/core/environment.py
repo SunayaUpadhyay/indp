@@ -27,7 +27,9 @@ class Environment(ABC):
         self,
         bounds: np.ndarray,
         observation_noise: float = 0.1,
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
+        physical_scale: float = 1.0,
+        use_normalized_coords: bool = False
     ):
         """
         Initialize environment.
@@ -36,15 +38,112 @@ class Environment(ABC):
             bounds: Spatial bounds [[x_min, x_max], [y_min, y_max]]
             observation_noise: Standard deviation of observation noise
             seed: Random seed for reproducibility
+            physical_scale: Meters per coordinate unit (default 1.0 = already in meters)
+            use_normalized_coords: If True, normalize coords to [0,1] internally
         """
         self.bounds = np.array(bounds)
         self.observation_noise = observation_noise
         self.seed = seed
+        self.physical_scale = physical_scale
+        self.use_normalized_coords = use_normalized_coords
+        
+        # Calculate coordinate system properties
+        self.coord_range = self.bounds[:, 1] - self.bounds[:, 0]
+        self.coord_min = self.bounds[:, 0]
+        
+        # Physical dimensions in meters
+        self.physical_size = self.coord_range * physical_scale
+        self.physical_area = self.physical_size[0] * self.physical_size[1]
         
         if seed is not None:
             self.rng = np.random.RandomState(seed)
         else:
             self.rng = np.random.RandomState()
+    
+    def to_normalized(self, X: np.ndarray) -> np.ndarray:
+        """
+        Convert from original coordinates to normalized [0,1].
+        
+        Args:
+            X: Points in original coordinate system, shape (n, 2)
+            
+        Returns:
+            Points in [0,1] x [0,1], shape (n, 2)
+        """
+        if not self.use_normalized_coords:
+            return X
+        X = np.atleast_2d(X)
+        return (X - self.coord_min) / self.coord_range
+    
+    def from_normalized(self, X_norm: np.ndarray) -> np.ndarray:
+        """
+        Convert from normalized [0,1] to original coordinates.
+        
+        Args:
+            X_norm: Points in normalized system, shape (n, 2)
+            
+        Returns:
+            Points in original coordinate system, shape (n, 2)
+        """
+        if not self.use_normalized_coords:
+            return X_norm
+        X_norm = np.atleast_2d(X_norm)
+        return X_norm * self.coord_range + self.coord_min
+    
+    def coord_to_meters(self, distance_coords: float) -> float:
+        """
+        Convert distance in coordinate units to physical meters.
+        
+        Args:
+            distance_coords: Distance in coordinate system
+            
+        Returns:
+            Distance in meters
+        """
+        if self.use_normalized_coords:
+            # If normalized, first scale to original coords, then to meters
+            avg_coord_scale = np.mean(self.coord_range)
+            return distance_coords * avg_coord_scale * self.physical_scale
+        else:
+            return distance_coords * self.physical_scale
+    
+    def meters_to_coord(self, distance_meters: float) -> float:
+        """
+        Convert distance in meters to coordinate units.
+        
+        Args:
+            distance_meters: Distance in meters
+            
+        Returns:
+            Distance in coordinate system
+        """
+        if self.use_normalized_coords:
+            avg_coord_scale = np.mean(self.coord_range)
+            return distance_meters / self.physical_scale / avg_coord_scale
+        else:
+            return distance_meters / self.physical_scale
+    
+    def get_physical_info(self) -> Dict[str, Any]:
+        """
+        Get physical environment information.
+        
+        Returns:
+            Dictionary with physical dimensions and scale info
+        """
+        diagonal_coords = np.linalg.norm(self.coord_range)
+        diagonal_meters = diagonal_coords * self.physical_scale
+        
+        return {
+            'coord_bounds': self.bounds,
+            'coord_size': self.coord_range,
+            'physical_scale': self.physical_scale,
+            'physical_size_m': self.physical_size,
+            'physical_area_m2': self.physical_area,
+            'physical_area_km2': self.physical_area / 1e6,
+            'diagonal_m': diagonal_meters,
+            'diagonal_km': diagonal_meters / 1000,
+            'use_normalized': self.use_normalized_coords
+        }
     
     @abstractmethod
     def evaluate(self, X: np.ndarray) -> np.ndarray:
@@ -127,6 +226,8 @@ class SyntheticEnvironment(Environment):
         function_name: str = 'peaks',
         observation_noise: float = 0.1,
         seed: Optional[int] = None,
+        physical_scale: float = 1.0,
+        use_normalized_coords: bool = False,
         **kwargs
     ):
         """
@@ -137,9 +238,11 @@ class SyntheticEnvironment(Environment):
             function_name: Name of test function ('peaks', 'ackley', 'rastrigin', etc.)
             observation_noise: Observation noise level
             seed: Random seed
+            physical_scale: Meters per coordinate unit
+            use_normalized_coords: If True, normalize coords to [0,1]
             **kwargs: Additional function-specific parameters
         """
-        super().__init__(bounds, observation_noise, seed)
+        super().__init__(bounds, observation_noise, seed, physical_scale, use_normalized_coords)
         self.function_name = function_name.lower()
         self.kwargs = kwargs
         
@@ -499,6 +602,8 @@ class NetCDFEnvironment(Environment):
         time_index: int = 0,
         observation_noise: float = 0.1,
         seed: Optional[int] = None,
+        physical_scale: float = 1.0,
+        use_normalized_coords: bool = False,
         spatial_coords: Tuple[str, str] = ('lon', 'lat'),
         time_coord: str = 'time'
     ):
@@ -512,10 +617,12 @@ class NetCDFEnvironment(Environment):
             time_index: Which time slice to use (for spatiotemporal data)
             observation_noise: Observation noise level
             seed: Random seed
+            physical_scale: Meters per coordinate unit
+            use_normalized_coords: If True, normalize coords to [0,1]
             spatial_coords: Names of spatial coordinate variables (x, y)
             time_coord: Name of time coordinate variable
         """
-        super().__init__(bounds, observation_noise, seed)
+        super().__init__(bounds, observation_noise, seed, physical_scale, use_normalized_coords)
         self.netcdf_path = netcdf_path
         self.variable_name = variable_name
         self.time_index = time_index
@@ -606,50 +713,73 @@ def create_environment(
     Factory function to create environments.
     
     Args:
-        bounds: Spatial bounds
+        bounds: Spatial bounds [[x_min, x_max], [y_min, y_max]]
         env_type: Type of environment
             - 'synthetic': Synthetic test functions
             - 'interpolated': Real data with interpolation
             - 'netcdf': NetCDF file (e.g., ROMS ocean data)
         **kwargs: Additional parameters for environment
+            - physical_scale: Meters per coordinate unit (default: 1.0)
+            - use_normalized_coords: Normalize to [0,1] internally (default: False)
+            - Other environment-specific parameters
         
     Returns:
         Environment instance
         
     Examples:
-        # Synthetic Townsend function
+        # Synthetic Townsend function: 475m × 425m area
         env = create_environment(
             bounds=np.array([[-2.25, 2.5], [-2.5, 1.75]]),
             env_type='synthetic',
-            function_name='townsend'
+            function_name='townsend',
+            physical_scale=100.0,  # Each coord unit = 100 meters
+            observation_noise=0.1
         )
+        # Physical size: 4.75 × 100 = 475m by 4.25 × 100 = 425m
         
-        # Gaussian mixture for S&R scenario
+        # Gaussian mixture for S&R: 1km × 1km search area
         env = create_environment(
             bounds=np.array([[0, 100], [0, 100]]),
             env_type='synthetic',
             function_name='gaussian_mixture',
+            physical_scale=10.0,  # Each coord unit = 10 meters
             n_components=9,
             seed=42
         )
+        # Physical size: 100 × 10 = 1000m = 1km per side
         
-        # Real data (e.g., LAMP lunar crater)
+        # Small lab environment: 100m × 100m
         env = create_environment(
-            bounds=np.array([[0, 1], [0, 1]]),
+            bounds=np.array([[0, 100], [0, 100]]),
+            env_type='synthetic',
+            function_name='peaks',
+            physical_scale=1.0,  # Already in meters
+            observation_noise=0.05
+        )
+        # Physical size: 100 × 1 = 100m per side
+        
+        # Real data (e.g., LAMP lunar crater): coordinates in pixels
+        env = create_environment(
+            bounds=np.array([[0, 1000], [0, 1000]]),
             env_type='interpolated',
             data_points=lamp_positions,
             data_values=lamp_measurements,
-            interpolation_method='rbf'
+            interpolation_method='rbf',
+            physical_scale=0.5  # Each pixel = 0.5 meters
         )
+        # Physical size: 1000 × 0.5 = 500m per side
         
-        # ROMS ocean data
+        # ROMS ocean data: lat/lon coordinates
         env = create_environment(
             bounds=np.array([[-125, -123], [43, 45]]),
             env_type='netcdf',
             netcdf_path='roms_oregon_coast.nc',
             variable_name='temp',
-            time_index=0
+            time_index=0,
+            physical_scale=111320.0,  # Degrees to meters (approx)
+            observation_noise=0.1
         )
+        # Physical size: 2° × 111320 ≈ 222.64 km per side
     """
     if env_type.lower() == 'synthetic':
         return SyntheticEnvironment(bounds=bounds, **kwargs)
