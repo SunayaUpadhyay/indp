@@ -16,13 +16,17 @@ and enables natural decentralized coordination.
 
 import numpy as np
 import heapq
-from typing import List, Dict, Tuple, Optional, Callable
+from typing import Any, List, Dict, Tuple, Optional, Callable, TYPE_CHECKING
 from dataclasses import dataclass, field
 from copy import deepcopy
 
 from ...core.robot import Robot
 from ...core.belief import GaussianProcessBelief
-from ..candidates.candidate_generator import CandidateSet
+from ..candidates.candidate_generator import CandidateSet, CandidateGenerator
+from ..mcts.mcts_planner import MCTSPlanner, MCTSConfig
+
+if TYPE_CHECKING:
+    from ...core.environment import Environment
 
 
 @dataclass
@@ -82,7 +86,12 @@ class KrigingBelieverAssignment:
         min_time_threshold: float = 60.0,
         sensor_time: float = 5.0,
         acquisition_function: Optional[Callable] = None,
-        verbose: bool = True
+        verbose: bool = True,
+        use_mcts_acquisition: bool = False,
+        mcts_config: Optional[MCTSConfig] = None,
+        mcts_candidate_limit: int = 25,
+        candidate_refresh_interval: Optional[int] = None,
+        candidate_budget_reserve: float = 0.0
     ):
         """
         Initialize kriging believer assignment.
@@ -94,6 +103,11 @@ class KrigingBelieverAssignment:
             sensor_time: Time required to take a measurement (seconds)
             acquisition_function: Function to select next target (if None, uses default MI)
             verbose: Whether to print progress messages
+            use_mcts_acquisition: If True, use MCTS planner instead of greedy acquisition
+            mcts_config: Optional configuration override for the MCTS planner
+            mcts_candidate_limit: Max candidates passed into MCTS to keep branching bounded
+            candidate_refresh_interval: Rebuild quadtree/candidates after this many new samples
+            candidate_budget_reserve: Reserve when regenerating feasibility checks
         """
         self.time_limit = time_limit
         self.environment = environment
@@ -101,6 +115,20 @@ class KrigingBelieverAssignment:
         self.sensor_time = sensor_time
         self.acquisition_function = acquisition_function
         self.verbose = verbose
+        self.use_mcts_acquisition = use_mcts_acquisition
+        self.mcts_candidate_limit = max(1, mcts_candidate_limit)
+        self.mcts_config = deepcopy(mcts_config) if mcts_config is not None else MCTSConfig(
+            iterations=250,
+            max_depth=6,
+            simulation_depth=4,
+            time_limit=0.2
+        )
+        self._mcts_planner: Optional[MCTSPlanner] = None
+        self.candidate_refresh_interval = candidate_refresh_interval
+        self.candidate_budget_reserve = candidate_budget_reserve
+        self._candidate_generator: Optional[CandidateGenerator] = None
+        self._samples_since_candidate_refresh: int = 0
+        self._decision_logger: Optional[Callable[[Dict[str, Any]], None]] = None
         
         # Assignment state
         self.robot_states: Dict[int, RobotAssignmentState] = {}
@@ -120,7 +148,9 @@ class KrigingBelieverAssignment:
         robots: List[Robot],
         candidate_sets: Dict[int, CandidateSet],
         gp_belief: GaussianProcessBelief,
-        environment_sampler: Callable[[np.ndarray], float]
+        environment_sampler: Callable[[np.ndarray], float],
+        candidate_generator: Optional[CandidateGenerator] = None,
+        decision_logger: Optional[Callable[[Dict[str, Any]], None]] = None
     ) -> Tuple[Dict[int, List[np.ndarray]], Dict[int, List[Tuple[np.ndarray, float, float]]]]:
         """
         Assign targets to robots using kriging believer approach.
@@ -137,6 +167,10 @@ class KrigingBelieverAssignment:
             candidate_sets: Candidate sets for each robot (from Step A)
             gp_belief: Initial GP belief state
             environment_sampler: Function to get measurement at position
+            candidate_generator: Optional generator to rebuild candidates during mission
+            decision_logger: Optional callback receiving state snapshots whenever
+                a new target assignment decision is made. The callback receives a
+                dictionary with GP copies, robot states, and selected targets.
             
         Returns:
             Tuple of:
@@ -144,6 +178,10 @@ class KrigingBelieverAssignment:
                 - Dict mapping robot_id to list of samples (position, value, timestamp)
         """
         # Initialize assignment state
+        self._candidate_generator = candidate_generator
+        self._samples_since_candidate_refresh = 0
+        self._mcts_planner = None
+        self._decision_logger = decision_logger
         self._initialize_assignment(robots, gp_belief, environment_sampler)
         
         # Assign initial targets to all robots
@@ -271,14 +309,15 @@ class KrigingBelieverAssignment:
                 print(f"    Feasible: {len(feasible)}, Already Targeted: {len(feasible)}")
                 print(f"    Robot is DONE exploring")
             return False
+
+        available = self._filter_budget_viable(available, robot)
+        if len(available) == 0:
+            if self.verbose:
+                print(f"\n  [ROBOT {robot_id}] Cannot assign new target - No budget-viable candidates")
+            return False
         
-        # Select best target using acquisition function (or default)
-        if self.acquisition_function is not None:
-            target = self.acquisition_function(
-                available, robot.position, self.gp_believer, robot.remaining_budget
-            )
-        else:
-            target = self._default_acquisition(available, robot.position)
+        # Select best target using configured strategy (MCTS preferred)
+        target = self._select_target(available, robot)
         
         # Calculate distance in coordinate units
         distance_coords = np.linalg.norm(target - robot.position)
@@ -322,8 +361,49 @@ class KrigingBelieverAssignment:
             print(f"    Arrival Time:         {event_time:.1f}s")
             print(f"    Budget Remaining:     {robot.remaining_budget:.1f}s")
             print(f"    Total Targets:        {len(state.assigned_targets)}")
+        self._log_assignment_decision(
+            robot_id=robot_id,
+            selected_target=target,
+            available_candidates=available
+        )
         
         return True
+
+    def _log_assignment_decision(
+        self,
+        robot_id: int,
+        selected_target: np.ndarray,
+        available_candidates: np.ndarray
+    ) -> None:
+        """Emit structured snapshot for downstream dataset collection."""
+        if self._decision_logger is None:
+            return
+        robot_state_snapshot: Dict[int, Dict[str, Any]] = {}
+        for rid, state in self.robot_states.items():
+            robot_state_snapshot[rid] = {
+                'position': state.robot.position.copy(),
+                'remaining_budget': state.robot.remaining_budget,
+                'current_target': None if state.current_target is None else state.current_target.copy(),
+                'assigned_targets': [target.copy() for target in state.assigned_targets],
+            }
+        snapshot = {
+            'time': self.simulation_clock,
+            'robot_id': robot_id,
+            'selected_target': selected_target.copy(),
+            'available_candidates': available_candidates.copy(),
+            'robot_states': robot_state_snapshot,
+            'global_targets': [
+                {'position': pos.copy(), 'robot_id': rid}
+                for pos, rid in self.all_target_points
+            ],
+            'global_samples': [
+                {'position': sample[0].copy(), 'value': sample[1], 'time': sample[2], 'robot_id': sample[3]}
+                for sample in self.global_samples
+            ],
+            'gp_believer': self.gp_believer.copy() if self.gp_believer is not None else None,
+            'gp_actual': self.gp_actual.copy() if self.gp_actual is not None else None,
+        }
+        self._decision_logger(snapshot)
     
     def _default_acquisition(
         self,
@@ -360,6 +440,106 @@ class KrigingBelieverAssignment:
         best_idx = np.argmax(scores)
         
         return candidates[best_idx]
+    
+    def _select_target(self, candidates: np.ndarray, robot: Robot) -> np.ndarray:
+        """Select next target using MCTS (if enabled) with graceful fallback."""
+        if self.use_mcts_acquisition:
+            mcts_target = self._select_target_with_mcts(candidates, robot)
+            if mcts_target is not None:
+                return mcts_target
+        
+        if self.acquisition_function is not None:
+            return self.acquisition_function(
+                candidates,
+                robot.position,
+                self.gp_believer,
+                robot.remaining_budget
+            )
+        
+        return self._default_acquisition(candidates, robot.position)
+    
+    def _select_target_with_mcts(self, candidates: np.ndarray, robot: Robot) -> Optional[np.ndarray]:
+        """Run a lightweight MCTS planner to pick the next best candidate."""
+        if len(candidates) == 0:
+            return None
+        subset = self._prepare_mcts_candidates(candidates, robot.position)
+        if subset.size == 0:
+            return None
+        feasible_mask = np.ones(len(subset), dtype=bool)
+        candidate_set = CandidateSet(
+            robot_id=robot.id,
+            points=subset,
+            feasible=feasible_mask
+        )
+        planner = self._get_mcts_planner()
+        path = planner.plan(
+            robot=robot,
+            candidates=candidate_set,
+            gp_belief=self.gp_believer,
+            sensor_time=self.sensor_time,
+            environment=self.environment
+        )
+        if len(path) > 0:
+            return path[0]
+        return subset[0]
+    
+    def _prepare_mcts_candidates(
+        self,
+        candidates: np.ndarray,
+        current_position: np.ndarray
+    ) -> np.ndarray:
+        """Trim candidate list so MCTS search stays focused."""
+        if len(candidates) <= self.mcts_candidate_limit:
+            return candidates
+        
+        _, std = self.gp_believer.predict(candidates, return_std=True)
+        variances = std ** 2
+        distances = np.linalg.norm(candidates - current_position, axis=1)
+        if self.environment is not None:
+            distances = np.array([
+                self.environment.coord_to_meters(d) for d in distances
+            ])
+        distances = np.maximum(distances, 1e-3)
+        scores = variances / distances
+        nearest_k = max(1, self.mcts_candidate_limit // 2)
+        best_by_distance = np.argsort(distances)[:nearest_k]
+        best_by_score = np.argsort(scores)[-self.mcts_candidate_limit:]
+        combined_indices = []
+        seen = set()
+        for idx in list(best_by_distance) + list(reversed(best_by_score)):
+            if idx in seen:
+                continue
+            combined_indices.append(idx)
+            seen.add(idx)
+            if len(combined_indices) >= self.mcts_candidate_limit:
+                break
+        return candidates[combined_indices]
+
+    def _filter_budget_viable(self, candidates: np.ndarray, robot: Robot) -> np.ndarray:
+        """Remove candidates that cannot be reached with remaining budget margin."""
+        if len(candidates) == 0:
+            return candidates
+        budget_margin = robot.remaining_budget - self.min_time_threshold
+        if budget_margin <= self.sensor_time:
+            return candidates
+        viable: List[np.ndarray] = []
+        for point in candidates:
+            distance = np.linalg.norm(point - robot.position)
+            if self.environment is not None:
+                distance = self.environment.coord_to_meters(distance)
+            travel_time = distance / max(robot.max_speed, 1e-6)
+            total_time = travel_time + self.sensor_time
+            if total_time <= budget_margin:
+                viable.append(point)
+        if viable:
+            return np.array(viable)
+        return candidates
+    
+    def _get_mcts_planner(self) -> MCTSPlanner:
+        """Lazily instantiate the MCTS planner."""
+        if self._mcts_planner is None:
+            self._mcts_planner = MCTSPlanner(self.mcts_config)
+        return self._mcts_planner
     
     def _update_kriging_believer(self) -> None:
         """Update kriging believer GP with all targeted (but not yet reached) points."""
@@ -452,6 +632,7 @@ class KrigingBelieverAssignment:
         positions = np.array([s[0] for s in self.global_samples])
         values = np.array([s[1] for s in self.global_samples])
         self.gp_actual.update(positions, values)
+        self._handle_post_sample_updates(candidate_sets)
         
         if self.verbose:
             print(f"\n{'='*70}")
@@ -469,6 +650,36 @@ class KrigingBelieverAssignment:
         
         # Assign next target if robot still has budget
         self._assign_next_target(robot.id, candidate_sets[robot.id])
+    
+    def _handle_post_sample_updates(self, candidate_sets: Dict[int, CandidateSet]) -> None:
+        """Handle bookkeeping after a real sample is incorporated."""
+        if self.candidate_refresh_interval is None or self._candidate_generator is None:
+            return
+        
+        self._samples_since_candidate_refresh += 1
+        if self._samples_since_candidate_refresh < self.candidate_refresh_interval:
+            return
+        
+        self._samples_since_candidate_refresh = 0
+        self._refresh_candidate_sets(candidate_sets)
+    
+    def _refresh_candidate_sets(self, candidate_sets: Dict[int, CandidateSet]) -> None:
+        """Regenerate candidate sets using the latest GP belief."""
+        if self._candidate_generator is None:
+            return
+        robots = [state.robot for state in self.robot_states.values()]
+        regenerated = self._candidate_generator.generate_candidates(
+            gp=self.gp_actual,
+            robots=robots,
+            budget_reserve=self.candidate_budget_reserve
+        )
+        updated = 0
+        for robot_id in self.robot_states.keys():
+            if robot_id in regenerated:
+                candidate_sets[robot_id] = regenerated[robot_id]
+                updated += 1
+        if self.verbose:
+            print(f"\n  [REFRESH] Candidate sets regenerated for {updated} robots")
     
     def get_final_gp(self) -> GaussianProcessBelief:
         """Get the final GP belief after all assignments."""

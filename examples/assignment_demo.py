@@ -18,12 +18,21 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
+from typing import Any, Dict, List, Tuple
 
 from src.core.environment import create_environment
 from src.core.belief import create_gp_belief
 from src.core.robot import Robot, BudgetType
 from src.planning.candidates.candidate_generator import CandidateGenerator
-from src.planning.assignment import KrigingBelieverAssignment
+from src.planning.assignment.kriging_believer import (
+    KrigingBelieverAssignment,
+    MCTSConfig
+)
+from src.baselines.auction_planner import AuctionVariancePlanner
+from src.baselines.random_planner import RandomMultiRobotPlanner
+from src.baselines.independent_greedy_planner import IndependentGreedyIGPlanner
+from src.baselines.lawnmower_planner import LawnmowerPlanner
+from src.baselines.sequential_greedy_planner import SequentialGreedyIGPlanner
 from config.units import print_environment_info
 
 
@@ -231,11 +240,12 @@ def visualize_assignment_results(
 
 
 def demo_assignment(
-    env_name='townsend',
+    env_name='gaussian_mixture',
     bounds=None,
-    n_init=1,
-    time_limit=200,  # 200 seconds
-    seed=42
+    n_init=5,
+    time_limit=100,  # 100 seconds
+    seed=42,
+    planner_type='kriging'
 ):
     """
     Run complete demo of Steps A + B.
@@ -246,12 +256,57 @@ def demo_assignment(
         n_init: Number of initial samples for GP
         time_limit: Mission time limit in seconds
         seed: Random seed
+        planner_type: Type of planner to use ('kriging' or other)
     """
     np.random.seed(seed)
-    
-    # Default bounds
+    env_key = env_name.lower()
+    env_presets = {
+        'gaussian_mixture': {
+    'bounds': np.array([[0.0, 100.0], [0.0, 100.0]]),
+    'physical_scale': 5.0,
+    'observation_noise': 0.08,
+    'env_kwargs': {'n_components': 5, 'covs': 10.0, 'weights': None},
+    'gp_params': {
+        'kernel_type': 'rbf',
+        'length_scale': 0.06,      # in normalized coords → picks up ~6% of domain
+        'variance': 2.5,
+        'noise': 0.09,
+        'use_normalized_coords': True
+    },
+    'quadtree_config': {
+        'max_depth': 9,
+        'min_cell_size': 0.6,
+        'variance_threshold': 0.5
+    },
+    'sampling_config': {
+        'method': 'grid',
+        'points_per_cell': 9,
+        'min_spacing': 0.5
+    },
+    'budget_reserve': 2.0
+},
+        'townsend': {
+            'bounds': np.array([[-2.25, 2.5], [-2.5, 1.75]]),
+            'physical_scale': 20.0,
+            'observation_noise': 0.05,
+            'env_kwargs': {},
+            'gp_params': {
+                'kernel_type': 'matern',
+                'length_scale': 0.2,
+                'variance': 1.0,
+                'noise': 0.05,
+                'use_normalized_coords': True
+            },
+            'quadtree_config': {'max_depth': 10, 'min_cell_size': 0.8, 'variance_threshold': 0.15},
+            'sampling_config': {'method': 'grid', 'points_per_cell': 8, 'min_spacing': 0.2},
+            'budget_reserve': 3.0
+        }
+    }
+    preset = env_presets.get(env_key, env_presets['gaussian_mixture'])
     if bounds is None:
-        bounds = np.array([[0, 100], [0, 100]])
+        bounds = preset['bounds'].copy()
+    else:
+        bounds = np.array(bounds, dtype=float)
     
     print(f"\n{'='*70}")
     print(f"STEP A + B DEMONSTRATION")
@@ -269,8 +324,10 @@ def demo_assignment(
     env = create_environment(
         bounds=bounds,
         env_type='synthetic',
-        function_name=env_name,
-        physical_scale=10.0  # Each unit = 10 meters
+        function_name=env_key,
+        physical_scale=preset['physical_scale'],
+        observation_noise=preset['observation_noise'],
+        **preset.get('env_kwargs', {})
     )
     init_points = np.random.uniform(
         [bounds[0, 0], bounds[1, 0]],
@@ -278,17 +335,20 @@ def demo_assignment(
         size=(n_init, 2)
     )
     init_values = env.evaluate(init_points)
-    gp = create_gp_belief(bounds, kernel_type='matern', length_scale=15.0,
-                          variance=1.0, noise=0.1)
+    # GP hyperparameters tuned per-environment (defaults come from preset table above)
+    gp = create_gp_belief(bounds, **preset['gp_params'])
     gp.update(init_points, init_values)
     
     # Create robots with TIME budgets and environment link
     # Robot speed: 2 m/s = 7.2 km/h (ground robot)
-    robot_speed_ms = 2.0
+    # Start all robots in the lower-left corner to stress long traversals
+    robot_speed_ms = 5.0
+    start_x = bounds[0, 0]
+    start_y = bounds[1, 0]
     robot_configs = [
-        ([0, 0], 200.0),  # Robot 0: start at origin, 200s budget
-        ([0, 0], 200.0),  # Robot 1: start at origin, 200s budget
-        ([0, 0], 200.0),  # Robot 2: start at origin, 200s budget
+        ([start_x, start_y], 100.0),  # Robot 0: start at southwest corner, 100s budget
+        ([start_x, start_y], 100.0),  # Robot 1: start at southwest corner, 100s budget
+        ([start_x, start_y], 100.0),  # Robot 2: start at southwest corner, 100s budget
     ]
     
     robots = [
@@ -301,14 +361,19 @@ def demo_assignment(
     for robot in robots:
         print(f"  Robot {robot.id}: position={robot.position}, budget={robot.remaining_budget}")
     
-    # Generate candidates
+    # Generate candidates with environment-specific refinement heuristics
     generator = CandidateGenerator(
         bounds=bounds,
-        quadtree_config={'max_depth': 8, 'min_cell_size': 2.0, 'variance_threshold': 0.01},
-        sampling_config={'method': 'grid', 'points_per_cell': 4, 'min_spacing': 7.0}
+        quadtree_config=preset['quadtree_config'],
+        sampling_config=preset['sampling_config']
     )
     
-    candidate_sets = generator.generate_candidates(gp, robots)
+    candidate_sets = generator.generate_candidates(
+        gp,
+        robots,
+        budget_reserve=preset.get('budget_reserve', 2.0)
+    )
+    per_robot_candidates: Dict[int, np.ndarray] = {}
     
     print(f"\nCandidate generation complete:")
     print(f"  Quadtree cells: {generator.quadtree.n_leaves}")
@@ -317,38 +382,178 @@ def demo_assignment(
     for robot_id, cand_set in candidate_sets.items():
         feasible = cand_set.get_feasible_points()
         print(f"  Robot {robot_id}: {len(feasible)}/{len(cand_set.points)} feasible candidates")
+        per_robot_candidates[robot_id] = np.array(feasible) if len(feasible) > 0 else np.empty((0, 2))
     
-    print(f"\n{'='*70}")
-    print(f"STEP B: KRIGING BELIEVER ASSIGNMENT")
+    planner_key = planner_type.lower()
+    valid_types = {'random', 'auction', 'independent', 'lawnmower', 'sequential', 'kriging'}
+    if planner_key not in valid_types:
+        raise ValueError(f"planner_type must be one of {sorted(valid_types)}")
+    label_map = {
+        'random': 'RANDOM BASELINE',
+        'auction': 'AUCTION-BASED',
+        'independent': 'INDEPENDENT GREEDY',
+        'lawnmower': 'LAWNMOWER COVERAGE',
+        'sequential': 'SEQUENTIAL GREEDY',
+        'kriging': 'KRIGING BELIEVER (MCTS)'
+    }
+    step_b_label = label_map[planner_key]
+    print(f"{'='*70}")
+    print(f"STEP B: {step_b_label} ASSIGNMENT")
     print(f"{'='*70}")
     
-    # Create assignment algorithm with TIME-based thresholds
-    # Robots have 200s time budget, speed is 1.0 m/s
-    # Reserve at least 5s for potential target assignment
-    # Sensor takes 1s to collect a measurement
-    assigner = KrigingBelieverAssignment(
-        time_limit=200.0,  # 200 seconds total mission time
-        environment=env,  # Pass environment for distance conversions
-        min_time_threshold=5.0,  # Reserve 5s minimum for new assignments
-        sensor_time=1.0,  # 1 second to take a measurement
-        verbose=True
-    )
+    assignments: Dict[int, List[np.ndarray]] = {}
+    samples: Dict[int, List[Tuple[np.ndarray, float, float]]] = {}
+    stats: Dict[str, Any]
+    final_gp = gp.copy()
     
-    # Environment sampler function
-    def environment_sampler(position):
-        return env.evaluate(position.reshape(1, -1))[0]
-    
-    # Run assignment
-    assignments, samples = assigner.assign_targets(
-        robots=robots,
-        candidate_sets=candidate_sets,
-        gp_belief=gp,
-        environment_sampler=environment_sampler
-    )
-    
-    # Get final GP and statistics
-    final_gp = assigner.get_final_gp()
-    stats = assigner.get_statistics()
+    if planner_key == 'kriging':
+        print("  Using Kriging Believer with MCTS-backed acquisition and periodic candidate refresh")
+        mcts_config = MCTSConfig(
+            iterations=600,
+            exploration_constant=1.2,
+            max_depth=10,
+            simulation_depth=5,
+            discount_factor=0.9,
+            pw_alpha=0.7,
+            pw_constant=1.5,
+            time_limit=1,
+            verbose=False
+        )
+        kb_assignment = KrigingBelieverAssignment(
+            time_limit=time_limit,
+            environment=env,
+            min_time_threshold=3.0,
+            sensor_time=1.0,
+            verbose=True,
+            use_mcts_acquisition=True,
+            mcts_config=mcts_config,
+            mcts_candidate_limit=500,
+            candidate_refresh_interval=5,
+            candidate_budget_reserve=2.0
+        )
+        env_sampler = lambda pos: env.evaluate(pos.reshape(1, -1))[0]
+        assignments, samples = kb_assignment.assign_targets(
+            robots=robots,
+            candidate_sets=candidate_sets,
+            gp_belief=gp.copy(),
+            environment_sampler=env_sampler,
+            candidate_generator=generator
+        )
+        final_gp = kb_assignment.get_final_gp()
+        stats = kb_assignment.get_statistics()
+    else:
+        # Shared configuration for BaseMultiRobotPlanner settings
+        planner_config: Dict[str, Any] = {
+            'sensor_time': 1.0,
+            'time_limit': time_limit,
+            'min_time_threshold': 3.0,
+            'seed': seed,
+            'verbose': True,
+        }
+        if planner_key == 'auction':
+            planner_config.update({
+                'grid_resolution': 50,
+                'num_candidates': 35,
+                'pool_factor': 2.0,
+                'variance_threshold_frac': 0.2,
+                'use_variance_only': True,
+                'normalize_utility': True,
+                'normalize_cost': True,
+                'distance_units': 'meters',
+                'min_cost_meters': 1.0,
+            })
+            planner = AuctionVariancePlanner(
+                robots=robots,
+                environment=env,
+                gp_belief=gp,
+                config=planner_config
+            )
+        elif planner_key == 'random':
+            planner_config.update({
+                'step_size': None,  # None => sample anywhere within bounds
+                'max_attempts': 200,
+            })
+            planner = RandomMultiRobotPlanner(
+                robots=robots,
+                environment=env,
+                gp_belief=gp,
+                config=planner_config
+            )
+        elif planner_key == 'independent':
+            planner_config.update({
+                'candidate_resolution': 30,
+            })
+            planner = IndependentGreedyIGPlanner(
+                robots=robots,
+                environment=env,
+                gp_belief=gp,
+                config=planner_config
+            )
+        elif planner_key == 'lawnmower':
+            planner_config.update({
+                'stripe_width': 15.0,  # meters
+                'orientation': 'vertical',
+                'waypoint_spacing': 12.0,
+            })
+            planner = LawnmowerPlanner(
+                robots=robots,
+                environment=env,
+                gp_belief=gp,
+                config=planner_config
+            )
+        else:  # sequential greedy
+            planner_config.update({
+                'candidate_resolution': 30,
+            })
+            planner = SequentialGreedyIGPlanner(
+                robots=robots,
+                environment=env,
+                gp_belief=gp,
+                config=planner_config
+            )
+            seq_candidates = {
+                rid: points for rid, points in per_robot_candidates.items() if len(points) > 0
+            }
+            if seq_candidates:
+                planner.set_robot_candidates(seq_candidates)
+        
+        # Auction planner benefits from reusing Step-A candidates; random planner ignores them
+        if isinstance(planner, AuctionVariancePlanner):
+            all_candidate_points = set()
+            for points in per_robot_candidates.values():
+                for point in points:
+                    all_candidate_points.add(tuple(point))
+            if all_candidate_points:
+                planner.eval_grid = np.array(sorted(all_candidate_points))
+                planner.num_candidates = min(planner.num_candidates, len(all_candidate_points))
+        
+        # Run baseline assignment
+        results = planner.execute_mission(max_iterations=1000, verbose=True)
+        
+        # Convert planner outputs to assignment_demo-friendly format
+        for robot in robots:
+            rid = robot.id
+            trajectory = results['robot_trajectories'][rid]
+            assignments[rid] = [np.array(pos) for pos in trajectory[1:]] if len(trajectory) > 1 else []
+            measurements: List[Tuple[np.ndarray, float, float]] = []
+            for pos, value, timestamp in robot.measurements:
+                measurements.append((pos.copy(), value, timestamp))
+            samples[rid] = measurements
+        
+        final_gp = planner.gp_belief
+        stats = {
+            'total_time': planner.simulation_clock,
+            'total_samples': results['total_measurements'],
+            'robot_stats': {
+                robot.id: {
+                    'samples_collected': len(samples[robot.id]),
+                    'targets_assigned': len(assignments[robot.id]),
+                    'final_budget': robot.remaining_budget,
+                    'budget_used': robot.initial_budget - robot.remaining_budget,
+                }
+                for robot in robots
+            }
+        }
     
     print(f"\n{'='*70}")
     print(f"ASSIGNMENT STATISTICS")
@@ -377,4 +582,5 @@ def demo_assignment(
 
 
 if __name__ == '__main__':
-    demo_assignment()
+    demo_assignment(planner_type='sequential')
+ 

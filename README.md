@@ -96,7 +96,7 @@ ipp_framework/
 The algorithm follows a receding horizon approach with six main steps per cycle:
 
 - **A) Candidate Generation**: Quadtree adaptive refinement based on GP variance
-- **B) Assignment**: Kriging Believer for conflict-free target selection  
+- **B) Assignment**: Kriging Believer for conflict-free target selection
 - **C) MCTS Planning**: Tree search within planning window
 - **D) Segment Selection**: Extract immediate actions from plan
 - **E) Execution**: Execute segment and collect measurements
@@ -104,14 +104,14 @@ The algorithm follows a receding horizon approach with six main steps per cycle:
 
 ## Current Status
 
-- ✅ Core data structures (Robot, GP, Environment)  
-- ✅ Configuration schema  
+- ✅ Core data structures (Robot, GP, Environment)
+- ✅ Configuration schema
 - ✅ Benchmark environments and documentation
-- 🔲 Candidate generation (Step A)  
-- 🔲 Kriging Believer assignment (Step B)  
-- 🔲 MCTS planner (Step C)  
-- 🔲 Main orchestrator loop  
-- 🔲 Visualization tools  
+- 🔲 Candidate generation (Step A)
+- 🔲 Kriging Believer assignment (Step B)
+- 🔲 MCTS planner (Step C)
+- 🔲 Main orchestrator loop
+- 🔲 Visualization tools
 - 🔲 Baseline implementations
 
 ## Features
@@ -119,11 +119,13 @@ The algorithm follows a receding horizon approach with six main steps per cycle:
 ### Environments
 
 **Synthetic Functions** (for controlled experiments):
+
 - Peaks, Ackley, Rastrigin, Rosenbrock, Sphere, Branin, Forrester
 - Townsend (local minima testing)
 - Gaussian Mixture (Search & Rescue scenarios)
 
 **Real-World Data** (for validation):
+
 - ROMS Oregon Coast ocean simulations
 - LAMP lunar crater hydration data
 - Lake Haviland field measurements
@@ -136,11 +138,20 @@ See [`BENCHMARKS.md`](BENCHMARKS.md) for full documentation.
 The framework uses YAML configuration files. See `config/default_config.yaml` for all available options.
 
 Key parameters:
+
 - `robots.n_robots`: Number of robots
 - `planning.window_length`: Planning horizon
 - `planning.execution_step`: Replanning frequency
 - `planning.mcts.n_iterations`: MCTS budget
 - `gp.backend`: GP implementation ('sklearn', 'gpy', 'gpytorch')
+
+## Advanced Assignment Options
+
+`KrigingBelieverAssignment` supports an optional MCTS-backed acquisition policy and adaptive candidate refresh:
+
+- Set `use_mcts_acquisition=True` (and optionally provide an `MCTSConfig`) to let a short-horizon MCTS search pick the next waypoint per robot. The planner normalizes variance gain by travel time, limits its candidate set via `mcts_candidate_limit`, and obeys its configured iteration/time caps to keep wall-clock cost predictable.
+- Provide a `CandidateGenerator` when calling `assign_targets` and set `candidate_refresh_interval` to rebuild the quadtree/candidate sets every N new real samples. This keeps Step A aligned with the evolving GP while preserving already-targeted points.
+- Use `candidate_budget_reserve` if you want feasibility checks during regeneration to keep a safety buffer on each robot's remaining budget.
 
 ## Running Examples
 

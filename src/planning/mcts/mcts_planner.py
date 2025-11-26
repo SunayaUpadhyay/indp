@@ -10,13 +10,16 @@ a robot's candidate window, balancing:
 
 import numpy as np
 import time
-from typing import List, Tuple, Optional, Dict, Any, Callable
+from typing import List, Tuple, Optional, Dict, Any, Callable, TYPE_CHECKING
 from dataclasses import dataclass
 from copy import deepcopy
 
 from ...core.robot import Robot
 from ...core.belief import GaussianProcessBelief
 from ..candidates.candidate_generator import CandidateSet
+
+if TYPE_CHECKING:
+    from ...core.environment import Environment
 
 
 @dataclass
@@ -149,6 +152,7 @@ class MCTSPlanner:
         self.candidates: Optional[CandidateSet] = None
         self.gp_belief: Optional[GaussianProcessBelief] = None
         self.sensor_time: float = 5.0  # Time to take a measurement
+        self.environment: Optional['Environment'] = None
         
         # Statistics
         self.planning_stats = {
@@ -167,7 +171,8 @@ class MCTSPlanner:
         candidates: CandidateSet,
         gp_belief: GaussianProcessBelief,
         sensor_time: float = 5.0,
-        environment_sampler: Optional[Callable[[np.ndarray], float]] = None
+        environment_sampler: Optional[Callable[[np.ndarray], float]] = None,
+        environment: Optional['Environment'] = None
     ) -> List[np.ndarray]:
         """
         Plan optimal sequence of sampling locations using MCTS.
@@ -178,6 +183,7 @@ class MCTSPlanner:
             gp_belief: Current GP belief state
             sensor_time: Time to collect one measurement
             environment_sampler: Optional function to get true values (for simulation)
+            environment: Optional environment for coordinate conversion
             
         Returns:
             List of target positions to visit in order
@@ -186,6 +192,7 @@ class MCTSPlanner:
         self.candidates = candidates
         self.gp_belief = deepcopy(gp_belief)
         self.sensor_time = sensor_time
+        self.environment = environment
         
         if self.config.verbose:
             print(f"\n{'='*70}")
@@ -318,8 +325,9 @@ class MCTSPlanner:
         
         # Simulate taking this action
         new_position = action
-        distance = np.linalg.norm(action - node.position)
-        travel_time = distance / self.robot.max_speed
+        distance_coords = np.linalg.norm(action - node.position)
+        distance_meters = self._coord_to_meters(distance_coords)
+        travel_time = distance_meters / max(self.robot.max_speed, 1e-6)
         total_time = travel_time + self.sensor_time
         new_budget = node.remaining_budget - total_time
         
@@ -378,23 +386,27 @@ class MCTSPlanner:
             
             # Random action selection for rollout
             action = available[np.random.randint(len(available))]
-            
-            # Simulate action
-            distance = np.linalg.norm(action - current_position)
-            travel_time = distance / self.robot.max_speed
+            distance_coords = np.linalg.norm(action - current_position)
+            distance_meters = self._coord_to_meters(distance_coords)
+            travel_time = distance_meters / max(self.robot.max_speed, 1e-6)
             total_time = travel_time + self.sensor_time
-            
+
+            step_reward = self._normalized_information_gain(
+                current_gp,
+                action,
+                current_position,
+                current_budget
+            )
+            reward += (discount ** depth) * step_reward
+
             # Update state
             current_position = action
             current_budget -= total_time
             visited.add(tuple(action))
             
-            # Update GP and calculate reward
+            # Update GP with imaginary measurement
             predicted_value, _ = current_gp.predict(action.reshape(1, -1))
             current_gp.update(action.reshape(1, -1), predicted_value)
-            
-            step_reward = self._calculate_information_gain(current_gp, action)
-            reward += (discount ** depth) * step_reward
             
             depth += 1
         
@@ -420,19 +432,12 @@ class MCTSPlanner:
         if node.parent is None:
             return 0.0
         
-        # Information gain component - variance BEFORE taking the measurement
-        # This represents how much uncertainty we reduce by sampling here
-        _, std_before = node.parent.gp_belief.predict(node.action.reshape(1, -1), return_std=True)
-        variance_before = std_before[0] ** 2
-        
-        # Use variance before as the information gain (higher variance = more valuable)
-        info_gain = variance_before
-        
-        # Efficiency component (penalize travel distance)
-        distance = np.linalg.norm(node.action - node.parent.position)
-        efficiency_penalty = -0.01 * distance  # Reduced weight to not dominate
-        
-        return info_gain + efficiency_penalty
+        return self._normalized_information_gain(
+            node.parent.gp_belief,
+            node.action,
+            node.parent.position,
+            node.parent.remaining_budget
+        )
     
     def _calculate_information_gain(
         self,
@@ -445,8 +450,35 @@ class MCTSPlanner:
         Uses variance as a proxy for information gain.
         """
         _, std = gp.predict(position.reshape(1, -1), return_std=True)
-        variance = std[0] ** 2
+        variance = max(std[0] ** 2, 1e-9)
         return variance
+    
+    def _normalized_information_gain(
+        self,
+        gp: GaussianProcessBelief,
+        position: np.ndarray,
+        reference_position: np.ndarray,
+        remaining_budget: Optional[float]
+    ) -> float:
+        """Scale variance by the budget fraction that would remain after acting."""
+        if remaining_budget is None or remaining_budget <= 0:
+            return -np.inf
+
+        info_gain = self._calculate_information_gain(gp, position)
+        distance_coords = np.linalg.norm(position - reference_position)
+        distance_meters = self._coord_to_meters(distance_coords)
+        travel_time = distance_meters / max(self.robot.max_speed, 1e-6)
+        action_cost = travel_time + self.sensor_time
+
+        if action_cost >= remaining_budget:
+            return -np.inf
+
+        cost_fraction = action_cost / remaining_budget
+        budget_scaling = max(0.0, 1.0 - cost_fraction)
+
+        # Reward mirrors recent UCT heuristics: immediate value (variance) scaled by
+        # the portion of budget we would still have after executing the action.
+        return info_gain * budget_scaling
     
     def _get_available_actions(self, node: MCTSNode) -> List[np.ndarray]:
         """Get available actions (candidate points) from current node."""
@@ -479,14 +511,21 @@ class MCTSPlanner:
                 continue
             
             # Check if reachable
-            distance = np.linalg.norm(point - position)
-            travel_time = distance / self.robot.max_speed
+            distance_coords = np.linalg.norm(point - position)
+            distance_meters = self._coord_to_meters(distance_coords)
+            travel_time = distance_meters / max(self.robot.max_speed, 1e-6)
             total_time = travel_time + self.sensor_time
             
             if total_time <= budget:
                 available.append(point)
         
         return available
+    
+    def _coord_to_meters(self, distance: float) -> float:
+        """Convert coordinate distance to meters if environment is available."""
+        if self.environment is not None:
+            return self.environment.coord_to_meters(distance)
+        return distance
     
     def _extract_best_path(self, root: MCTSNode) -> List[np.ndarray]:
         """

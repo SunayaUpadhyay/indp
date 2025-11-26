@@ -166,10 +166,11 @@ def visualize_results(env, gp, generator, candidate_sets, robots, init_points, b
         draw_robot(ax, robot, COLORS[idx])
         
         # Add range circle for legend
-        Circle(robot.position, robot.remaining_budget, fill=False,
+        range_circle = Circle(robot.position, robot.remaining_budget, fill=False,
               edgecolor=COLORS[idx], linewidth=CIRCLE_LINE,
               linestyle='--', alpha=CIRCLE_ALPHA,
               label=f'Range: {robot.remaining_budget:.1f}')
+        ax.add_patch(range_circle)
         
         feasible, infeasible = cand_set.get_feasible_points(), cand_set.points[~cand_set.feasible]
         if len(infeasible) > 0:

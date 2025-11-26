@@ -727,7 +727,7 @@ def create_environment(
         Environment instance
         
     Examples:
-        # Synthetic Townsend function: 475m × 425m area
+        # Synthetic Townsend function: 475m x 425m area
         env = create_environment(
             bounds=np.array([[-2.25, 2.5], [-2.5, 1.75]]),
             env_type='synthetic',
