@@ -240,7 +240,7 @@ def visualize_assignment_results(
 
 
 def demo_assignment(
-    env_name='gaussian_mixture',
+    env_name='townsend',
     bounds=None,
     n_init=5,
     time_limit=100,  # 100 seconds
@@ -425,10 +425,10 @@ def demo_assignment(
             min_time_threshold=3.0,
             sensor_time=1.0,
             verbose=True,
-            use_mcts_acquisition=True,
+            use_mcts_acquisition=False,
             mcts_config=mcts_config,
             mcts_candidate_limit=500,
-            candidate_refresh_interval=5,
+            candidate_refresh_interval=500,
             candidate_budget_reserve=2.0
         )
         env_sampler = lambda pos: env.evaluate(pos.reshape(1, -1))[0]
@@ -582,5 +582,5 @@ def demo_assignment(
 
 
 if __name__ == '__main__':
-    demo_assignment(planner_type='sequential')
+    demo_assignment(planner_type='kriging')
  

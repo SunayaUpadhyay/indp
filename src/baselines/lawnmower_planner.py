@@ -53,9 +53,16 @@ class LawnmowerPlanner(BaseMultiRobotPlanner):
         """
         super().__init__(robots, environment, gp_belief, config)
         
-        self.stripe_width = config.get('stripe_width', 10.0)
+        # User-facing configuration is provided in meters; convert to coordinate units
         self.orientation = config.get('orientation', 'vertical')
-        self.waypoint_spacing = config.get('waypoint_spacing', 10.0)  # Spacing along sweeps
+        self.stripe_width_m = config.get('stripe_width', 10.0)
+        self.waypoint_spacing_m = config.get('waypoint_spacing', 10.0)
+        self.stripe_width = self._to_coord_units(self.stripe_width_m)
+        self.waypoint_spacing = self._to_coord_units(self.waypoint_spacing_m)
+        if self.stripe_width <= 0:
+            self.stripe_width = 1e-3
+        if self.waypoint_spacing <= 0:
+            self.waypoint_spacing = 1e-3  # Avoid infinite loops
         
         # Precompute lawnmower paths for each robot
         self.robot_paths = {}
@@ -131,7 +138,10 @@ class LawnmowerPlanner(BaseMultiRobotPlanner):
         x_current = x_min
         going_up = True
         
-        while x_current <= x_max:
+        strip_width = max(x_max - x_min, 1e-9)
+        stride = min(self.stripe_width, strip_width)
+        epsilon = 1e-9
+        while x_current <= x_max + epsilon:
             if going_up:
                 # Sweep up in y - add intermediate waypoints
                 y_current = y_min
@@ -150,11 +160,13 @@ class LawnmowerPlanner(BaseMultiRobotPlanner):
                 going_up = True
             
             # Move to next sweep line
-            x_current += self.stripe_width
-            
-            # Add horizontal transition to next sweep (if within strip)
-            if x_current <= x_max:
-                path.append(np.array([x_current, y_max if not going_up else y_min]))
+            next_x = x_current + stride
+            if next_x > x_max:
+                next_x = x_max
+            if next_x - x_current <= epsilon:
+                break
+            x_current = next_x
+            path.append(np.array([x_current, y_max if not going_up else y_min]))
         
         return path
     
@@ -175,7 +187,10 @@ class LawnmowerPlanner(BaseMultiRobotPlanner):
         y_current = y_min
         going_right = True
         
-        while y_current <= y_max:
+        strip_height = max(y_max - y_min, 1e-9)
+        stride = min(self.stripe_width, strip_height)
+        epsilon = 1e-9
+        while y_current <= y_max + epsilon:
             if going_right:
                 # Sweep right in x - add intermediate waypoints
                 x_current = x_min
@@ -194,11 +209,13 @@ class LawnmowerPlanner(BaseMultiRobotPlanner):
                 going_right = True
             
             # Move to next sweep line
-            y_current += self.stripe_width
-            
-            # Add vertical transition to next sweep (if within strip)
-            if y_current <= y_max:
-                path.append(np.array([x_max if not going_right else x_min, y_current]))
+            next_y = y_current + stride
+            if next_y > y_max:
+                next_y = y_max
+            if next_y - y_current <= epsilon:
+                break
+            y_current = next_y
+            path.append(np.array([x_max if not going_right else x_min, y_current]))
         
         return path
     
@@ -254,7 +271,8 @@ class LawnmowerPlanner(BaseMultiRobotPlanner):
         info = {
             'planner_name': 'LawnmowerPlanner',
             'orientation': self.orientation,
-            'stripe_width': self.stripe_width,
+            'stripe_width_m': self.stripe_width_m,
+            'stripe_width_coords': self.stripe_width,
             'n_robots': len(self.robots),
             'total_waypoints': {
                 robot_id: len(path) 
@@ -262,3 +280,11 @@ class LawnmowerPlanner(BaseMultiRobotPlanner):
             }
         }
         return info
+
+    def _to_coord_units(self, distance: float) -> float:
+        """Convert a distance specified in meters into the environment's coordinate units."""
+        if distance is None:
+            return 0.0
+        if self.environment is None:
+            return float(distance)
+        return float(self.environment.meters_to_coord(distance))

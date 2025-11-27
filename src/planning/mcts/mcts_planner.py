@@ -384,8 +384,10 @@ class MCTSPlanner:
             if len(available) == 0:
                 break
             
-            # Random action selection for rollout
-            action = available[np.random.randint(len(available))]
+            # Heuristic rollout: prefer highest-variance (most informative) action
+            info_gains = [self._calculate_information_gain(current_gp, cand) for cand in available]
+            best_idx = int(np.argmax(info_gains))
+            action = available[best_idx]
             distance_coords = np.linalg.norm(action - current_position)
             distance_meters = self._coord_to_meters(distance_coords)
             travel_time = distance_meters / max(self.robot.max_speed, 1e-6)
